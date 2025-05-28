@@ -587,7 +587,9 @@
      &                 NF_FOUT, nvd4, u3dfrc, Aval, Vinfo, ncname)
         IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
 !
-!  Define surface V-momentum stress.
+!  Define surface V-momentum stress.  Notice that the stress has its
+!  own fixed time-dimension (of size Nfrec) to allow 4DVAR adjustments
+!  at other times in addition to initialization time.
 !
         Vinfo( 1)=Vname(1,idVsms)
         WRITE (Vinfo( 2),40) TRIM(Vname(2,idVsms))
@@ -895,7 +897,7 @@
           IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
         END IF
 #  endif
-#  ifdef UV_DESTAGGERED
+#  if defined JEDI || defined UV_DESTAGGERED
 !
 !  Define 3D Eastward momentum at RHO-points, A-grid.
 !
@@ -1304,7 +1306,7 @@
             got_var(idSbry(isVvel))=.TRUE.
             ADM(ng)%Vid(idSbry(isVvel))=var_id(i)
 #  endif
-#  ifdef UV_DESTAGGERED
+#  if defined JEDI || defined UV_DESTAGGERED
           ELSE IF (TRIM(var_name(i)).eq.TRIM(Vname(1,idu3dE))) THEN
             got_var(idu3dE)=.TRUE.
             ADM(ng)%Vid(idu3dE)=var_id(i)
@@ -1459,7 +1461,7 @@
           RETURN
         END IF
 #  endif
-#  ifdef UV_DESTAGGERED
+#  if defined JEDI || defined UV_DESTAGGERED
         IF (.not.got_var(idu3dE).and.Hout(idu3dE,ng)) THEN
           IF (Master) WRITE (stdout,70) TRIM(Vname(1,idu3dE)),          &
      &                                  TRIM(ncname)
@@ -1555,7 +1557,7 @@
 !
 !  Imported variable declarations.
 !
-      integer, intent(in) :: ng
+      integer, intent(in) :: ng, model
 
       logical, intent(in) :: ldef
 !
@@ -2060,7 +2062,9 @@
      &                 PIO_FOUT, nvd4, u3dfrc, Aval, Vinfo, ncname)
         IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
 !
-!  Define surface V-momentum stress.
+!  Define surface V-momentum stress.  Notice that the stress has its
+!  own fixed time-dimension (of size Nfrec) to allow 4DVAR adjustments
+!  at other times in addition to initialization time.
 !
         Vinfo( 1)=Vname(1,idVsms)
         WRITE (Vinfo( 2),40) TRIM(Vname(2,idVsms))
@@ -2427,7 +2431,7 @@
           IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
         END IF
 #   endif
-#   ifdef UV_DESTAGGERED
+#   if defined JEDI || defined UV_DESTAGGERED
 !
 !  Define 3D Eastward momentum at RHO-points, A-grid.
 !
@@ -2922,7 +2926,7 @@
             ADM(ng)%pioVar(idSbry(isVvel))%dkind=PIO_FOUT
             ADM(ng)%pioVar(idSbry(isVvel))%gtype=v3dvar
 #   endif
-#   ifdef UV_DESTAGGERED
+#   if defined JEDI || defined UV_DESTAGGERED
           ELSE IF (TRIM(var_name(i)).eq.TRIM(Vname(1,idu3dE))) THEN
             got_var(idu3dE)=.TRUE.
             ADM(ng)%pioVar(idu3dE)%vd=var_desc(i)
@@ -3103,7 +3107,7 @@
           exit_flag=3
           RETURN
         END IF
-#   ifdef UV_DESTAGGERED
+#   if defined JEDI || defined UV_DESTAGGERED
         IF (.not.got_var(idu3dE).and.Hout(idu3dE,ng)) THEN
           IF (Master) WRITE (stdout,70) TRIM(Vname(1,idu3dE)),          &
      &                                  TRIM(ncname)

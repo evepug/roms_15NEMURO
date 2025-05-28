@@ -382,6 +382,7 @@
 ** SANITY_CHECK               if tangent/adjoint codes sanity check          **
 ** SO_SEMI                    if stochastic optimals driver, semi-norm       **
 ** SO_TRACE                   if stochastic optimals, randomized trace       **
+** SPLIT_EXECUTABLE           if split executable for backround/analysis     **
 ** SPLIT_I4DVAR               if split I4D-Var data assimilation             **
 ** SPLIT_RBL4DVAR             if split RBL4D-Var data assimilation           **
 ** SPLIT_R4DVAR               if split R4D-Var data assimilation             **
@@ -524,10 +525,10 @@
 ** ROLLER_RENIERS      activate wave roller based on Reniers                 **
 ** SURFACE_STREAMING   activate wave enhanced surface streaming              **
 ** WAVE_MIXING         activate enhanced vertical viscosity mixing from waves**
-** WDISS_CHURTHOR      activate wave dissipation from Church/Thorton.        **
+** WDISS_CHURTHOR      activate wave dissipation from Church/Thornton.       **
 ** WDISS_GAMMA         activate wave dissipation when using InWave           **
 ** WDISS_ROELVINK      activate wave dissipation Roelvink when using InWave  **
-** WDISS_THORGUZA      activate wave dissipation from Thorton/Guza.          **
+** WDISS_THORGUZA      activate wave dissipation from Thornton/Guza.         **
 ** WDISS_WAVEMOD       activate wave dissipation from a wave model           **
 ** WEC_VF              activate wave-current stresses from Uchiyama et al.   **
 ** WET_DRY             activate wetting and drying                           **
@@ -629,6 +630,7 @@
 ** ICE_MODEL               to activate sea-ice model                         **
 ** ICE_THERMO              if thermodynamic component                        **
 ** ICE_MK                  if Mellor-Kantha thermodynamics (only choice)     **
+** ICE_ALBEDO              if computing surface albedo over water/snow/ice   **
 ** ICE_ALB_EC92            if albedo computation from Ebert and Curry        **
 ** ICE_MOMENTUM            if momentum component                             **
 ** ICE_MOM_BULK            if alternate ice-water stress computation         **

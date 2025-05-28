@@ -124,9 +124,8 @@
       integer :: MyMaster = 0
 
 #ifdef DISTRIBUTE
-# if defined DISJOINTED        || \
-    (defined PIO_LIB           && \
-     (defined ASYNCHRONOUS_PIO || defined ASYNCHRONOUS_SCORPIO))
+# if defined DISJOINTED || \
+    (defined PIO_LIB    && defined ASYNCHRONOUS_PIO)
 !
 !  Split communicator parameters.
 !
@@ -142,8 +141,7 @@
       integer :: TaskKey        ! Task split rank ordering: FullRank
       integer :: TaskSize       ! number of processes in TASK_COMM_WORLD
 #  endif
-#  if defined PIO_LIB          && \
-     (defined ASYNCHRONOUS_PIO || defined ASYNCHRONOUS_SCORPIO)
+#  if defined PIO_LIB && defined ASYNCHRONOUS_PIO
       integer :: PeerRank       ! process rank in PEER_COMM_WORLD
       integer :: PeerSize       ! number of processes in PEER_COMM_WORLD
 #  endif
@@ -156,6 +154,7 @@
       integer :: TaskRank = 0
       integer :: MyRank = 0
       integer :: MyThread = 0
+      integer :: MyTile = -1
 
 !$OMP THREADPRIVATE (MyThread)
 
@@ -164,8 +163,7 @@
 !
 !  Distributed-memory group communicator handles.
 !
-#  if defined PIO_LIB          && defined DISTRIBUTE           && \
-     (defined ASYNCHRONOUS_PIO || defined ASYNCHRONOUS_SCORPIO)
+#  if defined PIO_LIB && defined ASYNCHRONOUS_PIO
       integer :: PEER_COMM_WORLD            ! PIO full communicator
       integer :: INTER_COMM_WORLD           ! PIO inter-communicator
       integer :: IO_COMM_WORLD              ! I/O dedicated communicator
@@ -352,7 +350,7 @@
 !
 !  Get the number of processes in the group associated with the world
 !  communicator.  Here FullRank and MyRank are the same. It is computed
-!  for consistency wity concurrent applications.
+!  for consistency with concurrent applications.
 !
       CALL mpi_comm_size (OCN_COMM_WORLD, numthreads, MyError)
       IF (MyError.ne.0) THEN
@@ -364,6 +362,7 @@
       END IF
       CALL mpi_comm_rank (OCN_COMM_WORLD, FullRank, MyError)
       ForkSize=numthreads
+      MyTile=MyRank
 !
 !  Identify master, input and output threads.
 !

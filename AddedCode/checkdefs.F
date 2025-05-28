@@ -768,7 +768,7 @@
 #endif
 #if defined BOTTOM_STREAMING && defined WEC_VF
       IF (Master) WRITE (stdout,20) 'BOTTOM_STREAMING',                 &
-     &   'Wave current streaming term'
+     &   'Wave current bottom streaming term'
       is=LEN_TRIM(Coptions)+1
       Coptions(is:is+18)=' BOTTOM_STREAMING,'
 #endif
@@ -2292,6 +2292,13 @@
       is=LEN_TRIM(Coptions)+1
       Coptions(is:is+13)=' PARALLEL_IO,'
 #endif
+#if defined PBLH && defined BULK_FLUXES && defined FRC_COUPLING
+!
+      IF (Master) WRITE (stdout,20) 'PBLH',                             &
+     &   'Use atmosphere boundary layer thickness for wind gustiness'
+      is=LEN_TRIM(Coptions)+1
+      Coptions(is:is+10)=' PBLH,'
+#endif
 #if defined CARBON && defined BIO_FENNEL
 # if defined PCO2AIR_DATA
 !
@@ -2841,6 +2848,15 @@
       is=LEN_TRIM(Coptions)+1
       Coptions(is:is+10)=' SUSPLOAD,'
 # endif
+#endif
+#if defined SPLIT_EXECUTABLE && \
+   (defined SPLIT_I4DVAR     || defined SPLIT_RBL4DVAR || \
+    defined SPLIT_R4DVAR     || defined SPLIT_SP4DVAR)
+!
+      IF (Master) WRITE (stdout,20) 'SPLIT_EXECUTABLE',                 &
+     &   'Split 4D-Var executable for background/analysis phases'
+      is=LEN_TRIM(Coptions)+1
+      Coptions(is:is+18)=' SPLIT_EXECUTABLE,'
 #endif
 #if defined STD_MODEL && defined FOUR_DVAR
 !
@@ -3571,14 +3587,14 @@
 #if defined WDISS_THORGUZA && defined WEC_VF
 !
       IF (Master) WRITE (stdout,20) 'WDISS_THORGUZA',                   &
-     &   'Wave energy dissipation computed from Thorton/Guza 1986'
+     &   'Wave energy dissipation from Thornton and Guza 1986'
       is=LEN_TRIM(Coptions)+1
       Coptions(is:is+16)=' WDISS_THORGUZA,'
 #endif
 #if defined WDISS_CHURTHOR && defined WEC_VF
 !
       IF (Master) WRITE (stdout,20) 'WDISS_CHURTHOR',                   &
-     &   'Wave energy dissipation computed from Church/Thorton 1986'
+     &   'Wave energy dissipation from Church and Thornton 1993'
       is=LEN_TRIM(Coptions)+1
       Coptions(is:is+16)=' WDISS_CHURTHOR,'
 #endif

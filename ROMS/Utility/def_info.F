@@ -45,6 +45,7 @@
 !    DimIDs(31) => Number of 2D variables time levels (3)              !
 !    DimIDs(32) => Number of sediment tracers                          !
 !    DimIDs(33) => Number of light spectral bands.                     !
+!    DimIDs(34) => Number constant depth slices in 'extract_slice'.    !
 !                                                                      !
 !=======================================================================
 !
@@ -118,7 +119,7 @@
       integer, parameter :: Natt = 25
 
       integer :: brydim, i, ie, is, j, lstr, varid
-      integer :: srdim, stadim, status, swdim, trcdim, usrdim
+      integer :: slicedim, srdim, stadim, status, swdim, trcdim, usrdim
 #ifdef SEDIMENT
       integer :: seddim
 #endif
@@ -170,6 +171,7 @@
       srdim=DimIDs(9)
       swdim=DimIDs(10)
       trcdim=DimIDs(11)
+      slicedim=DimIDs(34)
 #ifdef SEDIMENT
       seddim=DimIDs(32)
 #endif
@@ -3137,6 +3139,19 @@
       IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
 #endif
 !
+!  Depth of horizontal slices.
+!
+      IF (Nslice.gt.0) THEN
+        Vinfo( 1)='z_slice'
+        Vinfo( 2)='constant depth of output fields horizontal slices'
+        Vinfo(24)='_FillValue'
+        Aval(6)=spval
+        status=def_var(ng, model, ncid, varid, NF_TYPE,                 &
+     &                 1, (/slicedim/), Aval, Vinfo, ncname,            &
+     &               SetParAccess = .FALSE.)
+        IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
+      END IF
+!
 !  User generic parameters.
 !
       IF (Nuser.gt.0) THEN
@@ -3652,7 +3667,7 @@
       integer, parameter :: Natt = 25
 
       integer :: brydim, FileH, i, ie, is, j, lstr
-      integer :: srdim, stadim, status, swdim, trcdim, usrdim
+      integer :: slicedim, srdim, stadim, status, swdim, trcdim, usrdim
 # ifdef SEDIMENT
       integer :: seddim
 # endif
@@ -3706,6 +3721,7 @@
       srdim=DimIDs(9)
       swdim=DimIDs(10)
       trcdim=DimIDs(11)
+      slicedim=DimIDs(34)
 # ifdef SEDIMENT
       seddim=DimIDs(32)
 # endif
@@ -3975,6 +3991,35 @@
           END IF
         END IF
       END IF
+
+# ifdef GRID_EXTRACT
+        IF (exit_flag.eq.NoError) THEN
+          status=PIO_put_att(pioFile, PIO_global, 'extract_grid',       &
+     &                        TRIM(GRX(ng)%name))
+          IF (FoundError(status, PIO_noerr, __LINE__, MyFile)) THEN
+            IF (Master) WRITE (stdout,20) 'extract_grid', TRIM(ncname)
+            exit_flag=3
+            ioerror=status
+          END IF
+        END IF
+
+        IF (exit_flag.eq.NoError) THEN
+          IF (LdefXTR(ng)) THEN
+            IF (ndefXTR(ng).gt.0) THEN
+              status=PIO_put_att(pioFile, PIO_global, 'extract_base',   &
+     &                           TRIM(XTR(ng)%base))
+            ELSE
+              status=PIO_put_att(pioFile, PIO_global, 'extract_file',   &
+     &                           TRIM(XTR(ng)%name))
+            END IF
+            IF (FoundError(status, PIO_noerr, __LINE__, MyFile)) THEN
+              IF (Master) WRITE (stdout,20) 'extract_file', TRIM(ncname)
+              exit_flag=3
+              ioerror=status
+            END IF
+          END IF
+        END IF
+# endif
 
 # if defined AVERAGES    || \
    (defined AD_AVERAGES && defined ADJOINT) || \
@@ -4781,6 +4826,30 @@
      &               1, (/0/), Aval, Vinfo, ncname,                     &
      &               SetParAccess = .FALSE.)
       IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
+
+# ifdef GRID_EXTRACT
+      Vinfo( 1)='nXTR'
+      Vinfo( 2)='number of time-steps between extract history records'
+      status=def_var(ng, model, pioFile, pioVar, PIO_int,               &
+     &               1, (/0/), Aval, Vinfo, ncname,                     &
+     &               SetParAccess = .FALSE.)
+      IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
+
+      Vinfo( 1)='ndefXTR'
+      Vinfo( 2)='number of time-steps between the creation of '//       &
+     &          'extract history files'
+      status=def_var(ng, model, pioFile, pioVar, PIO_int,               &
+     &               1, (/0/), Aval, Vinfo, ncname,                     &
+     &               SetParAccess = .FALSE.)
+      IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
+
+      Vinfo( 1)='ExtractFlag'
+      Vinfo( 2)='field extraction flag to interpolate or decimate'
+      status=def_var(ng, model, pioFile, pioVar, PIO_int,               &
+     &               1, (/0/), Aval, Vinfo, ncname,                     &
+     &               SetParAccess = .FALSE.)
+      IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
+# endif
 
       Vinfo( 1)='nRST'
       Vinfo( 2)='number of time-steps between restart records'
@@ -6611,6 +6680,19 @@
       IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
 # endif
 !
+!  Depth of horizontal slices.
+!
+      IF (Nslice.gt.0) THEN
+        Vinfo( 1)='z_slice'
+        Vinfo( 2)='constant depth of output fields horizontal slices'
+        Vinfo(24)='_FillValue'
+        Aval(6)=spval
+        status=def_var(ng, model, pioFile, pioVar, PIO_TYPE,            &
+     &                 1, (/slicedim/), Aval, Vinfo, ncname,            &
+     &                 SetParAccess = .FALSE.)
+        IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
+      END IF
+!
 !  User generic parameters.
 !
       IF (Nuser.gt.0) THEN
@@ -6620,7 +6702,7 @@
         Aval(6)=spval
         status=def_var(ng, model, pioFile, pioVar, PIO_TYPE,            &
      &                 1, (/usrdim/), Aval, Vinfo, ncname,              &
-     &               SetParAccess = .FALSE.)
+     &                 SetParAccess = .FALSE.)
         IF (FoundError(exit_flag, NoError, __LINE__, MyFile)) RETURN
       END IF
 # ifdef STATIONS
