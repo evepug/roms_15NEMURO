@@ -53,9 +53,9 @@
 **  Biological model options.
 */
 
-#define BIO_FENNEL
+#undef BIO_FENNEL
 #undef  ECOSIM
-#undef  NEMURO
+#define  NEMURO
 #undef  NPZD_FRANKS
 #undef  NPZD_IRON
 #undef  NPZD_POWELL

@@ -1,0 +1,2922 @@
+      MODULE biology_mod
+!
+!git $Id$
+!================================================== Hernan G. Arango ===
+!  Copyright (c) 2002-2025 The ROMS Group                              !
+!    Licensed under a MIT/X style license                              !
+!    See License_ROMS.md                                               !
+!=======================================================================
+!                                                                      !
+!  Nemuro Lower Trophic Level Ecosystem Model.                         !
+!                                                                      !
+!  This routine computes the biological sources and sinks and adds     !
+!  then the global biological fields. Currently, the ecosystem has     !
+!  the following functional compartments:                              !
+!                                                                      !
+!    iSphy     small phytoplankton biomass, nanophytoplankton          !
+!    iLphy     large phytoplankton biomass, diatoms                    !
+!    iSzoo     small zooplankton biomass, microzooplankton (ciliates)  !
+!    iLzoo     large zooplankton biomass, mesozooplankton (copepods)   !
+!    iPzoo     predator zooplankton biomass (euphausiids, etc)         !
+!    iNO3_     nitrate concentration, NO3                              !
+!    iNH4_     ammonium concentration, NH4                             !
+!    iPON_     particulate organic nitrogen                            !
+!    iDON_     dissolved organic nitrogen                              !
+!    iSiOH     silicate concentration, Si(OH)4 (silicic acid)          !
+!    iopal     particulate organic silica                              !
+!                                                                      !
+!  Reference:                                                          !
+!                                                                      !
+!    Kishi, M. J., et  all, 2007: Nemuro - a lower trophic level       !
+!      model for the North Pacific marine ecosystem,  Ecological       !
+!      Modelling, 202, 12-25.                                          !
+!                                                                      !
+!=======================================================================
+!
+      implicit none
+!
+      PRIVATE
+      PUBLIC  :: biology
+!
+      CONTAINS
+!
+!***********************************************************************
+      SUBROUTINE biology (ng,tile)
+!***********************************************************************
+!
+      USE mod_param
+      USE mod_forces
+      USE mod_grid
+      USE mod_ncparam
+      USE mod_ocean
+      USE mod_stepping
+!
+!  Imported variable declarations.
+!
+      integer, intent(in) :: ng, tile
+!
+!  Local variable declarations.
+!
+      character (len=*), parameter :: MyFile =                          &
+     &  __FILE__
+!
+#include "tile.h"
+!
+!  Set header file name.
+!
+#ifdef DISTRIBUTE
+      IF (Lbiofile(iNLM)) THEN
+#else
+      IF (Lbiofile(iNLM).and.(tile.eq.0)) THEN
+#endif
+        Lbiofile(iNLM)=.FALSE.
+        BIONAME(iNLM)=MyFile
+      END IF
+!
+#ifdef PROFILE
+      CALL wclock_on (ng, iNLM, 15, __LINE__, MyFile)
+#endif
+      CALL nemuro_tile (ng, tile,                                      &
+     &                  LBi, UBi, LBj, UBj, N(ng), NT(ng),             &
+     &                  IminS, ImaxS, JminS, JmaxS,                    &
+     &                  nstp(ng), nnew(ng),                            &
+#ifdef MASKING
+     &                   GRID(ng) % rmask,                              &
+#endif
+     &                   GRID(ng) % Hz,                                 &
+     &                   GRID(ng) % z_r,                                &
+     &                   GRID(ng) % z_w,                                &
+#if defined ATTSW_LIN
+     &                   GRID(ng) % h  ,                                &
+#endif
+     &                   FORCES(ng) % srflx,                            &
+#if defined CARB || defined OXY
+# ifdef BULK_FLUXES
+     &                   FORCES(ng) % Uwind,                            &
+     &                   FORCES(ng) % Vwind,                            &
+# else
+     &                   FORCES(ng) % sustr,                            &
+     &                   FORCES(ng) % svstr,                            &
+# endif
+#endif
+#ifdef CARB
+     &                   OCEAN(ng) % pH,                                &
+     &                   OCEAN(ng) % CO2flx,                            &
+     &                   OCEAN(ng) % pCO2,                              &
+#endif
+     &                   OCEAN(ng) % t)
+
+#ifdef PROFILE
+      CALL wclock_off (ng, iNLM, 15, __LINE__, MyFile)
+#endif
+!
+      RETURN
+      END SUBROUTINE biology
+!
+!-----------------------------------------------------------------------
+      SUBROUTINE nemuro_tile (ng, tile,                                 &
+     &                        LBi, UBi, LBj, UBj, UBk, UBt,             &
+     &                        IminS, ImaxS, JminS, JmaxS,               &
+     &                        nstp, nnew,                               &
+#ifdef MASKING
+     &                         rmask,                                   &
+#endif
+     &                         Hz, z_r, z_w,                            &
+#if defined ATTSW_LIN
+     &                         h,                                       &
+#endif
+     &                         srflx,                                   &
+#if defined CARB || defined OXY
+# ifdef BULK_FLUXES
+     &                         Uwind, Vwind,                            &
+# else
+     &                         sustr, svstr,                            &
+# endif
+#endif
+#ifdef CARB
+     &                         pH, CO2flx, pCO2,                        &
+#endif
+
+     &                         t)
+!-----------------------------------------------------------------------
+!
+      USE mod_param
+      USE mod_biology
+      USE mod_ncparam
+      USE mod_scalars
+#if defined CARB
+      USE mod_biology, ONLY: pCO2_water
+#endif
+
+!
+!  Imported variable declarations.
+!
+      integer, intent(in) :: ng, tile
+      integer, intent(in) :: LBi, UBi, LBj, UBj, UBk, UBt
+      integer, intent(in) :: IminS, ImaxS, JminS, JmaxS
+      integer, intent(in) :: nstp, nnew
+#if defined ATTSW_LIN
+      real(r8), intent(in) :: h(LBi:,LBj:)
+#endif
+#ifdef ASSUMED_SHAPE
+# ifdef MASKING
+      real(r8), intent(in) :: rmask(LBi:,LBj:)
+# endif
+      real(r8), intent(in) :: Hz(LBi:,LBj:,:)
+      real(r8), intent(in) :: z_r(LBi:,LBj:,:)
+      real(r8), intent(in) :: z_w(LBi:,LBj:,0:)
+      real(r8), intent(in) :: srflx(LBi:,LBj:)
+# if defined CARB || defined OXY
+#  ifdef BULK_FLUXES
+      real(r8), intent(in) :: Uwind(LBi:,LBj:)
+      real(r8), intent(in) :: Vwind(LBi:,LBj:)
+#  else
+      real(r8), intent(in) :: sustr(LBi:,LBj:)
+      real(r8), intent(in) :: svstr(LBi:,LBj:)
+#  endif
+# endif
+# ifdef CARB
+      real(r8), intent(inout) :: pH(LBi:,LBj:,:)
+      real(r8), intent(inout) :: CO2flx(LBi:,LBj:)
+      real(r8), intent(inout) :: pCO2(LBi:,LBj:,:)
+# endif
+      real(r8), intent(inout) :: t(LBi:,LBj:,:,:,:)
+#else
+# ifdef MASKING
+      real(r8), intent(in) :: rmask(LBi:UBi,LBj:UBj)
+# endif
+      real(r8), intent(in) :: Hz(LBi:UBi,LBj:UBj,UBk)
+      real(r8), intent(in) :: z_r(LBi:UBi,LBj:UBj,UBk)
+      real(r8), intent(in) :: z_w(LBi:UBi,LBj:UBj,0:UBk)
+      real(r8), intent(in) :: srflx(LBi:UBi,LBj:UBj)
+# if defined CARB || defined OXY
+#  ifdef BULK_FLUXES
+      real(r8), intent(in) :: Uwind(LBi:UBi,LBj:UBj)
+      real(r8), intent(in) :: Vwind(LBi:UBi,LBj:UBj)
+#  else
+      real(r8), intent(in) :: sustr(LBi:UBi,LBj:UBj)
+      real(r8), intent(in) :: svstr(LBi:UBi,LBj:UBj)
+#  endif
+# endif
+# ifdef CARB
+      real(r8), intent(inout) :: pH(LBi:UBi,LBj:UBj,UBk)
+      real(r8), intent(inout) :: CO2flx(LBi:UBi,LBj:UBj)
+      real(r8), intent(inout) :: pCO2(LBi:UBi,LBj:UBj,UBk)
+# endif
+      real(r8), intent(inout) :: t(LBi:UBi,LBj:UBj,UBk,3,UBt)
+#endif
+!
+!  Local variable declarations.
+!
+#ifdef N15
+# ifdef SINK_RATIO
+      integer, parameter :: Nsink = 3
+# else
+      integer, parameter :: Nsink = 4
+# endif
+#else
+      integer, parameter :: Nsink = 2
+#endif
+      integer :: Iter, ibio, indx, isink, itime, itrc, iTrcMax
+      integer :: i, j, k, ks
+
+      integer, dimension(Nsink) :: idsink
+
+      real(r8), parameter :: MinVal = 1.0e-6_r8
+#if defined NEMUCSC
+      real(r8) :: Att, Irr, kappa
+#else
+      real(r8) :: AttL, AttS, IrrL, IrrS, KappaL, KappaS
+#endif
+#if defined ATTSW_LIN
+      real(r8) :: AttSW_new
+      real(r8), parameter :: Att_slope = -2.22e-5_r8
+      real(r8), parameter :: Att_int = 0.0844_r8
+#endif
+      real(r8) :: dtdays, dz
+      real(r8) :: GppAPS, GppAPL, GppNPS, GppNPL, GppPS, GppPL
+      real(r8) :: GraPL2ZL, GraPL2ZP, GraPS2ZL, GraPS2ZS
+      real(r8) :: GraZL2ZP, GraZS2ZL, GraZS2ZP
+#if defined NEMUCSC
+      real(r8) :: GraPL2ZS
+#endif
+      real(r8) :: EgeZL, EgeZP, EgeZS
+      real(r8) :: ExcPL, ExcPS, ExcZL, ExcZP, ExcZS
+      real(r8) :: MorPL, MorPS
+# if defined OXY
+#  if defined DENIT
+      real(r8) :: DenitPON, DenitDON
+#  endif
+# endif
+
+#if defined NEM_SPONGE
+      integer :: nbfr
+      real(r8) :: nemfac
+      real(r8), dimension(IminS:ImaxS) :: mortfac
+#endif
+      real(r8) :: ResPL, ResPS
+      real(r8) :: RnewL, RnewS
+      real(r8) :: cff, cff1, cff2, cff3, cff4, cff5, cff6, cff7
+#if defined CARB
+      real(r8) :: cffC,u10squ
+      real(r8) :: CO2_Flux, CO2_sol, SchmidtN, TempK
+      real(r8) :: tempik, saltik, ticik, talkik, phik, pco2ik
+# if defined NEMURO_CO2_SECULAR
+      real(r8) :: pCO2air_secular
+# endif
+
+!   include this?
+# ifdef MASKING
+      real(r8) :: maskik
+# endif
+!   ?
+#endif
+#if defined OXY
+!
+! parameters for NEMURO oxygen model
+!
+      real(r8), parameter :: OA0 = 2.00907_r8       ! Oxygen
+      real(r8), parameter :: OA1 = 3.22014_r8       ! saturation
+      real(r8), parameter :: OA2 = 4.05010_r8       ! coefficients
+      real(r8), parameter :: OA3 = 4.94457_r8
+      real(r8), parameter :: OA4 =-0.256847_r8
+      real(r8), parameter :: OA5 = 3.88767_r8
+      real(r8), parameter :: OB0 =-0.00624523_r8
+      real(r8), parameter :: OB1 =-0.00737614_r8
+      real(r8), parameter :: OB2 =-0.0103410_r8
+      real(r8), parameter :: OB3 =-0.00817083_r8
+      real(r8), parameter :: OC0 =-0.000000488682_r8
+      real(r8), parameter :: rOxNO3= 8.625_r8       ! 138/16
+      real(r8), parameter :: rOxNH4= 6.625_r8       ! 106/16
+# if defined DENIT
+! where did this number come from?
+! we want to know what the ratio of NO3 lost to
+! NH4 created in denitrification is. To find it, we 
+! can take the ratio of C lost to NH4 created by remineralization 
+! (using redfield ratio C:N of 106/16=6.625), and divide it by the ratio
+! of C lost to NO3 lost in denitrification (using value of 0.8 from 
+! PISCES model). 
+      real(r8), parameter :: rNO3NH4= 8.3_r8      ! ratio of NO3 used to NH4 created 
+# endif
+      real(r8), parameter :: l2mol = 1000.0_r8/22.3916_r8      ! from ml/l to umol/l (=mmol/m3)
+      real(r8) :: u10squ, SchmidtN_Ox, O2satu, O2_Flux
+      real(r8) :: TS, AA
+#endif
+#if defined CARB
+!
+!Parameters for NEMURO carbon model
+!
+      real(r8), parameter :: Acoef = 2073.1_r8      ! Schmidt
+      real(r8), parameter :: Bcoef = 125.62_r8      ! number
+      real(r8), parameter :: Ccoef = 3.6276_r8      ! transfer
+      real(r8), parameter :: Dcoef = 0.043219_r8    ! coefficients
+      real(r8), parameter :: A1 = -60.2409_r8       ! surface
+      real(r8), parameter :: A2 = 93.4517_r8        ! CO2
+      real(r8), parameter :: A3 = 23.3585_r8        ! solubility
+      real(r8), parameter :: B1 = 0.023517_r8       ! coefficients
+      real(r8), parameter :: B2 = -0.023656_r8
+      real(r8), parameter :: B3 = 0.0047036_r8
+# if defined NEMURO_CO2_TREND
+      real(r8), parameter, dimension(12) :: pCO2air_mo =                &
+     &    (/ 0.05_r8, 0.67_r8, 1.45_r8, 2.59_r8, 3.03_r8, 2.32_r8,      &
+     &       0.72_r8,-1.45_r8,-3.13_r8,-3.24_r8,-2.07_r8,-0.90_r8 /)
+# endif
+#endif
+
+!search should this be included?
+!No: these are already defined in ROMS/Modules/mod_scalars.F
+!      integer, parameter :: itemp = 1 !search should this be included?
+!      integer, parameter :: isalt = 2
+!go looking to understand where/if tracer #s were defined for temp/salt
+!search
+      real(r8) :: fac, fac1, fac2, fac3, fac4, fac5, fac6, fac7
+#if defined NEMUCSC
+      real(r8) :: fac8
+#endif
+      real(r8) :: cffL, cffR, cu, dltL, dltR
+
+      real(r8), dimension(Nsink) :: Wbio
+
+      integer, dimension(IminS:ImaxS,N(ng)) :: ksource
+
+      real(r8), dimension(IminS:ImaxS) :: PARsur
+
+      real(r8), dimension(NT(ng),2) :: BioTrc
+
+      real(r8), dimension(IminS:ImaxS,N(ng),NT(ng)) :: Bio
+      real(r8), dimension(IminS:ImaxS,N(ng),NT(ng)) :: Bio_old
+
+      real(r8), dimension(IminS:ImaxS,0:N(ng)) :: FC
+
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: Hz_inv
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: Hz_inv2
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: Hz_inv3
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: LightL
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: LightS
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: WL
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: WR
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: bL
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: bR
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: qc
+
+#ifdef N15
+      real(r8) :: MorZS, MorZL, MorZP
+      real(r8) :: nitrif, remin, decomp, reminDON
+      real(r8) :: GppAPS15, GppAPL15, GppNPS15 
+      real(r8) :: GppNPL15, GppPS15, GppPL15
+      real(r8) :: GppAPS14, GppAPL14, GppNPS14
+      real(r8) :: GppNPL14, GppPS14, GppPL14 
+      real(r8) :: GraPL2ZL15, GraPL2ZP15, GraPS2ZL15, GraPS2ZS15
+      real(r8) :: GraZL2ZP15, GraZS2ZL15, GraZS2ZP15
+# if defined NEMUCSC
+      real(r8) :: GraPL2ZS15
+# endif      
+      real(r8) :: EgeZL15, EgeZP15, EgeZS15
+      real(r8) :: ExcPL15, ExcPS15
+      real(r8) :: ExcPL14, ExcPS14
+      real(r8) :: ExcZL15, ExcZP15, ExcZS15, ExcZ15
+      real(r8) :: MorPL15, MorPS15
+      real(r8) :: MorPL14, MorPS14
+      real(r8) :: MorZS15, MorZL15, MorZP15
+      real(r8) :: ResPL15, ResPS15
+      real(r8) :: ResPL14, ResPS14
+      real(r8) :: nitrif15, remin15, decomp15, reminDON15
+      real(r8) :: cff_iso1,cff_iso2, cff_iso3, cff_iso4, cff_iso5
+      real(r8) :: cff_iso6, cff_iso7, cff_iso8, cff_iso9, cff_iso10
+      real(r8) :: epsilon_NH4,epsilon_NO3,epsilon_nitrif
+      real(r8) :: epsilon_remin,epsilon_decomp,epsilon_reminDON
+      real(r8) :: gamma_NH4,gamma_NO3,gamma_exc, gamma_nitrif
+      real(r8) :: gamma_remin,gamma_decomp,gamma_reminDON
+      real(r8) :: NO3_old,NH4_old
+# if defined OXY
+#  if defined DENIT
+      real(r8) :: gamma_denitPON, DenitPON15
+      real(r8) :: gamma_denitDON, DenitDON15
+#  endif
+# endif
+#endif
+
+#ifdef N15_LIM
+      real(r8), parameter :: Rstd = 1.0_r8
+      real(r8), parameter :: t_d15N = 6.0_r8
+      real(r8), parameter :: min_d15N = -10.0_r8
+      real(r8), parameter :: max_d15N = 30.0_r8
+      real(r8), parameter :: low_d15N = 3.0_r8
+      real(r8), parameter :: high_d15N = 25.0_r8
+      real(r8) :: d15N
+#endif
+
+#ifdef N15_LIM2
+      real(r8), parameter :: lim_min = 1.0E-6_r8
+#endif
+
+#ifdef N15_CHECKS_BIOTOY
+      real(r8) :: d15N
+      real(r8) :: d15N_old
+      real(r8) :: d15N_change
+      real(r8) :: Szoo_old
+      real(r8) :: Szoo_change
+      real(r8) :: PON_change
+      real(r8), parameter :: Rstd = 1.0_r8
+#endif
+
+#ifdef NEG_ALERT
+      real(r8), parameter :: limval=0.0_r8
+#endif
+
+#ifdef N15_CHECKS_BIOTOY2
+      real(r8) :: d15N_phyto
+      real(r8) :: d15N_phyto_old
+      real(r8) :: d15N_phyto_change
+      real(r8) :: d15N_DON
+      real(r8) :: d15N_DON_old
+
+!      real(r8), parameter :: Rstd = 1.0_r8
+#endif
+#ifdef CHECK_SINK_MBAL
+      real(r8) :: sum_PON_vert
+      real(r8) :: sum_PON15_vert
+      real(r8) :: sum_PON14_vert
+#endif
+#include "set_bounds.h"
+!
+!-----------------------------------------------------------------------
+!  Add biological Source/Sink terms.
+!-----------------------------------------------------------------------
+!
+!  Avoid computing source/sink terms if no biological iterations.
+!
+      IF (BioIter(ng).le.0) RETURN
+!
+!  Set time-stepping size (days) according to the number of iterations.
+!
+      dtdays=dt(ng)*sec2day/REAL(BioIter(ng),r8)
+!
+!  Set vertical sinking indentification vector.
+!
+      idsink(1)=iPON_                 ! particulate organic nitrogen
+      idsink(2)=iopal                 ! particulate organic silica
+#if defined N15
+# if defined SINK_RATIO
+      idsink(3)=iPONratio             ! 15PON/14PON
+# else 
+      idsink(3)=iPON15_               ! particulate organic 15 nitrogen
+      idsink(4)=iPON14_               ! particulate organic 14 nitrogen
+# endif
+#endif
+#if defined CARB & ! defined KO_CARB_SINK
+      idsink(4)=iCalC                 ! carbon detritus
+#endif
+
+!
+!  Set vertical sinking velocity vector in the same order as the
+!  identification vector, IDSINK.
+!
+      Wbio(1)=setVPON(ng)             ! particulate organic nitrogen
+      Wbio(2)=setVOpal(ng)            ! particulate organic silica
+#if defined N15
+# if defined SINK_RATIO
+      Wbio(3)=setVPONratio(ng)       ! 15PON/14PON 
+# else
+      Wbio(3)=setVPON15(ng)           ! particulate organic 15 nitrogen
+      Wbio(4)=setVPON14(ng)           ! particulate organic 14 nitrogen
+# endif
+#endif
+
+#if defined CARB & ! defined KO_CARB_SINK
+      Wbio(4)=setVCalC(ng)                 ! carbon detritus
+#endif
+
+!
+!  Compute inverse thickness to avoid repeated divisions.
+!
+      J_LOOP : DO j=Jstr,Jend
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+            Hz_inv(i,k)=1.0_r8/Hz(i,j,k)
+          END DO
+        END DO
+        DO k=1,N(ng)-1
+          DO i=Istr,Iend
+            Hz_inv2(i,k)=1.0_r8/(Hz(i,j,k)+Hz(i,j,k+1))
+          END DO
+        END DO
+        DO k=2,N(ng)-1
+          DO i=Istr,Iend
+            Hz_inv3(i,k)=1.0_r8/(Hz(i,j,k-1)+Hz(i,j,k)+Hz(i,j,k+1))
+          END DO
+        END DO
+
+! Check d15N valus of PON
+#ifdef N15_CHECKS_BIOTOY
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+
+# ifdef MASKING
+            IF (rmask(i,j).EQ.1) THEN
+# endif
+             IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+               d15N=(((t(i,j,k,nstp,iPON15_)/                       &
+     &              t(i,j,k,nstp,iPON14_))/Rstd)-1)*1000
+               print *, "before nemuro d15N PON=", d15N
+               d15N_old=d15N
+             ENDIF
+# ifdef MASKING
+            ENDIF
+# endif
+          END DO
+        END DO
+#endif
+
+!  Extract biological variables from tracer arrays, place them into
+!  scratch arrays, and restrict their values to be positive definite.
+!  At input, all tracers (index nnew) from predictor step have
+!  transport units (m Tunits) since we do not have yet the new
+!  values for zeta and Hz. These are known after the 2D barotropic
+!  time-stepping.
+!
+
+        DO itrc=1,NBT
+          ibio=idbio(itrc)
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+# ifdef MASKING
+              IF (rmask(i,j).EQ.1) THEN
+# endif
+
+# ifdef NEG_ALERT
+               IF ((ibio.NE.12) .AND. (ibio.NE.13) .AND. (ibio.NE.33)) THEN
+                IF (t(i,j,k,nstp,ibio).LE.limval) THEN
+                  print *, "before nemuro nstp i,j,k,ibio(eq to tracer#),val=", i,j,k,ibio,t(i,j,k,nstp,ibio)
+                ENDIF
+                IF (t(i,j,k,nstp,ibio).LE.0.0_r8) THEN
+                  print *, "negative alert!"
+                ENDIF
+               ENDIF
+               IF ((ibio.NE.12) .AND. (ibio.NE.13) .AND. (ibio.NE.33)) THEN
+                IF (t(i,j,k,nnew,ibio).LE.limval) THEN
+                  print *, "before nemuro nnew i,j,k,ibio(eq to tracer#),val=", i,j,k,ibio,t(i,j,k,nnew,ibio)
+                ENDIF
+                IF (t(i,j,k,nnew,ibio).LE.0.0_r8) THEN
+                  print *, "negative alert!"
+                ENDIF
+               ENDIF
+# endif
+               Bio_old(i,k,ibio)=MAX(0.0_r8,t(i,j,k,nstp,ibio))
+               Bio(i,k,ibio)=Bio_old(i,k,ibio)
+# ifdef MASKING
+              ENDIF
+# endif
+            END DO
+          END DO
+        END DO
+
+!  Extract potential temperature and salinity.
+!
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+            Bio(i,k,itemp)=t(i,j,k,nstp,itemp)
+#if defined OXY || defined CARB
+! TODO Jerome added this, keep?
+!           Bio(i,k,itemp)=MIN(t(i,j,k,nstp,itemp),35.0_r8)
+            Bio(i,k,isalt)=t(i,j,k,nstp,isalt)
+#endif
+          END DO
+        END DO
+!
+!  Calculate surface Photosynthetically Available Radiation (PAR).  The
+!  net shortwave radiation is scaled back to Watts/m2 and multiplied by
+!  the fraction that is photosynthetically available, PARfrac.
+!
+        DO i=Istr,Iend
+          PARsur(i)=PARfrac(ng)*srflx(i,j)*rho0*Cp
+        END DO
+!
+!=======================================================================
+!  Start internal iterations to achieve convergence of the nonlinear
+!  backward-implicit solution.
+!=======================================================================
+!
+!  During the iterative procedure a series of fractional time steps are
+!  performed in a chained mode (splitting by different biological
+!  conversion processes) in sequence of the main food chain.  In all
+!  stages the concentration of the component being consumed is treated
+!  in a fully implicit manner, so the algorithm guarantees non-negative
+!  values, no matter how strong the concentration of active consuming
+!  component (Phytoplankton or Zooplankton).  The overall algorithm,
+!  as well as any stage of it, is formulated in conservative form
+!  (except explicit sinking) in sense that the sum of concentration of
+!  all components is conserved.
+!
+!  In the implicit algorithm, we have for example (N: nutrient,
+!                                                  P: phytoplankton),
+!
+!     N(new) = N(old) - uptake * P(old)     uptake = mu * N / (Kn + N)
+!                                                    {Michaelis-Menten}
+!  below, we set
+!                                           The N in the numerator of
+!     cff = mu * P(old) / (Kn + N(old))     uptake is treated implicitly
+!                                           as N(new)
+!
+!  so the time-stepping of the equations becomes:
+!
+!     N(new) = N(old) / (1 + cff)     (1) when substracting a sink term,
+!                                         consuming, divide by (1 + cff)
+!  and
+!
+!     P(new) = P(old) + cff * N(new)  (2) when adding a source term,
+!                                         growing, add (cff * source)
+!
+!  Notice that if you substitute (1) in (2), you will get:
+!
+!     P(new) = P(old) + cff * N(old) / (1 + cff)    (3)
+!
+!  If you add (1) and (3), you get
+!
+!     N(new) + P(new) = N(old) + P(old)
+!
+!  implying conservation regardless how "cff" is computed. Therefore,
+!  this scheme is unconditionally stable regardless of the conversion
+!  rate. It does not generate negative values since the constituent
+!  to be consumed is always treated implicitly. It is also biased
+!  toward damping oscillations.
+!
+!  The iterative loop below is to iterate toward an universal Backward-
+!  Euler treatment of all terms. So if there are oscillations in the
+!  system, they are only physical oscillations. These iterations,
+!  however, do not improve the accuaracy of the solution.
+!
+        ITER_LOOP: DO Iter=1,BioIter(ng)
+!
+!  Compute light attenuation as function of depth.
+!
+!search in Chris' version, there are some light related CPP defs and a thing
+!with NEMUCSC
+!do not need LIGHT_CFF
+!do need NEMUCSC alterations to light attenuation? maybe?
+!not sure at this point, a little unclear why there is a LightS/LightL
+          cff1=1.0/VmaxS(ng)
+          cff2=1.0/VmaxL(ng)
+          DO i=Istr,Iend
+#if defined NEMUCSC
+            Att=PARsur(i)
+#else
+            AttS=PARsur(i)
+            AttL=PARsur(i)
+#endif
+            IF (PARsur(i).gt.0.0_r8) THEN              ! day time
+              DO k=N(ng),1,-1
+!
+!  Attenuate the light to the center of the grid cell using the
+!  Platt et al. (1980) photoinhibition formulation. Here, AttSW is
+!  the light attenuation due to seawater and AttPS and AttPL is the
+!  attenuation due to Small and Large Phytoplankton (self-shading
+!  coefficient).
+!
+                dz=0.5_r8*(z_w(i,j,k)-z_w(i,j,k-1))
+#if defined NEMUCSC
+# if defined ATTSW_LIN
+                AttSW_new=MAX(AttSW(ng),MIN(AttSW(ng)*2.0_r8,           &
+     &                    h(i,j)*Att_slope+Att_int))
+                kappa=AttSW_new+AttPS(ng)*Bio(i,k,iSphy)+               &
+     &                          AttPL(ng)*Bio(i,k,iLphy)
+# else
+                kappa=AttSW(ng)+AttPS(ng)*Bio(i,k,iSphy)+               &
+     &                          AttPL(ng)*Bio(i,k,iLphy)
+# endif
+                Irr=EXP(-kappa*dz)
+                Att=Att*Irr
+                LightS(i,k)=(1.0_r8-EXP(-alphaPS(ng)*Att*cff1))*        &
+     &                      EXP(-betaPS(ng)*Att*cff1)
+                LightL(i,k)=(1.0_r8-EXP(-alphaPL(ng)*Att*cff2))*        &
+     &                      EXP(-betaPL(ng)*Att*cff2)
+!
+!  Attenuate the light to the bottom of the grid cell.
+!
+                Att=Att*Irr
+#else
+# if defined ATTSW_LIN
+                AttSW_new=MAX(AttSW(ng),MIN(AttSW(ng)*2.0_r8,           &
+     &                    h(i,j)*Att_slope+Att_int))
+                kappaS=AttSW_new+                                       &
+     &                 AttPS(ng)*(Bio(i,k,iSphy)+Bio(i,k,iLphy))
+                kappaL=AttSW_new+                                       &
+     &                 AttPL(ng)*(Bio(i,k,iSphy)+Bio(i,k,iLphy))
+# else
+                kappaS=AttSW(ng)+                                       &
+     &                 AttPS(ng)*(Bio(i,k,iSphy)+Bio(i,k,iLphy))
+                kappaL=AttSW(ng)+                                       &
+     &                 AttPL(ng)*(Bio(i,k,iSphy)+Bio(i,k,iLphy))
+# endif
+                IrrS=EXP(-kappaS*dz)
+                IrrL=EXP(-kappaL*dz)
+                AttS=AttS*IrrS
+                AttL=AttL*IrrL
+                LightS(i,k)=(1.0_r8-EXP(-alphaPS(ng)*AttS*cff1))*       &
+     &                      EXP(-betaPS(ng)*AttS*cff1)
+                LightL(i,k)=(1.0_r8-EXP(-alphaPL(ng)*AttL*cff2))*       &
+     &                      EXP(-betaPL(ng)*AttL*cff2)
+!
+!  Attenuate the light to the bottom of the grid cell.
+!
+                AttS=AttS*IrrS
+                AttL=AttL*IrrL
+#endif
+              END DO
+            ELSE                                       ! night time
+              DO k=1,N(ng)
+                LightS(i,k)=0.0_r8
+                LightL(i,k)=0.0_r8
+              END DO
+            END IF
+          END DO
+
+! Check d15N values of Sphy
+#ifdef N15_CHECKS_BIOTOY2
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+
+# ifdef MASKING
+            IF (rmask(i,j).EQ.1) THEN
+# endif
+             IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+               d15N_phyto=(((Bio(i,k,iSphy15)/Bio(i,k,iSphy14))/Rstd)-1)*1000
+               d15N_phyto_old=d15N_phyto
+               print *, "before phytoplankton production d15N Sphy=", d15N_phyto
+             ENDIF
+# ifdef MASKING
+            ENDIF
+# endif
+          END DO
+        END DO
+#endif
+
+
+!-----------------------------------------------------------------------
+!  Phytoplankton primary productivity.
+!-----------------------------------------------------------------------
+!
+!  Gross primary production of Small Phytoplankton consisting of
+!  nutrient uptake (NO3 and NH4) terms, temperature-dependend term,
+!  and light limitation term. The Michaelis-Menten curve is used to
+!  describe the change in uptake rate as a function of nutrient
+!  concentration.
+!
+!search in Chris's version, dtdays is new_dtdays? Not sure where it comes from?
+!seems same as dtdays, but not 100% positive is ok
+          cff=dtdays*VmaxS(ng)
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+!
+!  Small Phytoplankton gross primary productivity, GppPS.
+!
+              cff1=cff*EXP(KGppS(ng)*Bio(i,k,itemp))*LightS(i,k)*       &
+     &             Bio(i,k,iSphy)
+#if defined VALLINA
+              cff2=cff1*(1.0_r8-                                        &
+     &             (Bio(i,k,iNH4_)/(Bio(i,k,iNH4_)+KNH4S(ng))))/        &
+     &             (KNO3S(ng)+Bio(i,k,iNO3_))
+#else
+              cff2=cff1*EXP(-PusaIS(ng)*Bio(i,k,iNH4_))/                &
+     &             (KNO3S(ng)+Bio(i,k,iNO3_))
+#endif
+              cff3=cff1/(KNH4S(ng)+Bio(i,k,iNH4_))
+#if defined N15_LIM2
+              IF (Bio(i,k,iNO3_).LT.lim_min) THEN
+                cff2=0.0_r8
+              ENDIF
+#endif
+#if defined N15_LIM2
+              IF (Bio(i,k,iNH4_).LT.lim_min) THEN
+                cff3=0.0_r8
+              ENDIF
+#endif
+#if defined N15
+              NO3_old=Bio(i,k,iNO3_)
+              NH4_old=Bio(i,k,iNH4_)
+#endif
+              Bio(i,k,iNO3_)=Bio(i,k,iNO3_)/(1.0_r8+cff2)
+              Bio(i,k,iNH4_)=Bio(i,k,iNH4_)/(1.0_r8+cff3)
+              GppNPS=Bio(i,k,iNO3_)*cff2
+              GppAPS=Bio(i,k,iNH4_)*cff3
+              GppPS=GppNPS+GppAPS
+              Bio(i,k,iSphy)=Bio(i,k,iSphy)+GppPS
+
+#if defined N15
+              IF (NO3_old.GT.0.0_r8) THEN
+                epsilon_NO3=eps_GppNO3(ng)*                           &
+     &                      (1.0_r8-(GppNPS/NO3_old))
+              ELSE
+                epsilon_NO3=0.0_r8
+              ENDIF
+              IF (NH4_old.GT.0.0_r8) THEN
+                epsilon_NH4=eps_GppNH4(ng)*                           &
+     &                        (1.0_r8-(GppAPS/NH4_old))
+              ELSE
+                epsilon_NH4=0.0_r8
+              ENDIF
+              gamma_NO3=1.0_r8-(epsilon_NO3/1000.0_r8)
+              gamma_NH4=1.0_r8-(epsilon_NH4/1000.0_r8)
+              IF ((Bio(i,k,iNO3_).GT.0.0_r8) .AND.                    &
+     &            (Bio(i,k,iNO315_).GT.0.0_r8) .AND.                  &
+     &            (Bio(i,k,iNO314_).GT.0.0_r8)) THEN
+                GppNPS15=GppNPS*(gamma_NO3*(Bio(i,k,iNO315_)            &
+     &                   /Bio(i,k,iNO314_)))/(1.0_r8+(gamma_NO3*        &
+     &                   (Bio(i,k,iNO315_)/Bio(i,k,iNO314_))))
+                GppNPS14=GppNPS-GppNPS15
+              ELSE
+                GppNPS15=0.0_r8
+                GppNPS14=0.0_r8
+              ENDIF
+              IF ((Bio(i,k,iNH4_).GT.0.0_r8) .AND.                      &
+     &            (Bio(i,k,iNH415_).GT.0.0_r8) .AND.                    &
+     &            (Bio(i,k,iNH414_).GT.0.0_r8)) THEN
+                GppAPS15=GppAPS*(gamma_NH4*(Bio(i,k,iNH415_)            &
+     &                   /Bio(i,k,iNH414_)))/(1.0_r8+(gamma_NH4*        &
+     &                   (Bio(i,k,iNH415_)/Bio(i,k,iNH414_))))
+                GppAPS14=GppAPS-GppAPS15
+              ELSE
+                GppAPS15=0.0_r8
+                GppAPS14=0.0_r8
+              ENDIF
+              GppPS15=GppNPS15+GppAPS15
+              GppPS14=GppNPS14+GppAPS14
+              Bio(i,k,iNO315_)=Bio(i,k,iNO315_)-GppNPS15
+              Bio(i,k,iNH415_)=Bio(i,k,iNH415_)-GppAPS15
+              Bio(i,k,iSphy15)=Bio(i,k,iSphy15)+GppPS15
+              Bio(i,k,iNO314_)=Bio(i,k,iNO314_)-GppNPS14
+              Bio(i,k,iNH414_)=Bio(i,k,iNH414_)-GppAPS14
+              Bio(i,k,iSphy14)=Bio(i,k,iSphy14)+GppPS14
+#endif
+
+#if defined OXY
+!OX1.1.2
+              Bio(i,k,iOxyg)=Bio(i,k,iOxyg)+GppNPS*rOxNO3+GppAPS*rOxNH4
+#endif
+#if defined CARB
+!C1.1.1
+!search changed BIOmin to MinVal
+!Chris says probably ok b/c not doing assimilation
+              cffC=(1.0_r8+0.07_r8)*RedCN(ng)*GppPS/                    &
+     &                    MAX(MinVal,Bio(i,k,iTIC_))
+              Bio(i,k,iTIC_)=Bio(i,k,iTIC_)/(1.0_r8+cffC)
+              Bio(i,k,iTAlk)=Bio(i,k,iTAlk)+GppNPS
+              cffC=2.0_r8*0.07_r8*RedCN(ng)*GppPS/                      &
+     &              MAX(MinVal,Bio(i,k,iTAlk))
+              Bio(i,k,iTAlk)=Bio(i,k,iTAlk)/(1.0_r8+cffC)
+              Bio(i,k,iCalC)=Bio(i,k,iCalC)+0.07_r8*RedCN(ng)*GppPS
+#endif
+
+#ifdef N15_CHECKS_BIOTOY2
+              IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                d15N_phyto=(((Bio(i,k,iSphy15)/Bio(i,k,iSphy14))/Rstd)-1)*1000
+                d15N_phyto_change=d15N_phyto-d15N_phyto_old
+                d15N_phyto_old=d15N_phyto
+                print *, "after phytoplankton production d15N Sphy change=", d15N_phyto_change
+              ENDIF
+#endif
+
+!
+!  Small Phytoplankton respiration rate, ResPS, assumed to be
+!  proportional to biomass. Use ratio of NO3 uptake to total uptake
+!  (NO3 + NH4) to compute respiration contributions.
+!
+!search: do I want nemuro code mod5?
+!no dont need this-assimilation related
+              RnewS=GppNPS/MAX(MinVal,GppPS)
+              cff4=dtdays*ResPS0(ng)*EXP(KResPS(ng)*Bio(i,k,itemp))
+#if defined N15_LIM2
+              IF (Bio(i,k,iSphy).LT.lim_min) THEN
+                cff4=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iSphy)=Bio(i,k,iSphy)/(1.0_r8+cff4)
+              ResPS=Bio(i,k,iSphy)*cff4
+              Bio(i,k,iNO3_)=Bio(i,k,iNO3_)+ResPS*RnewS
+              Bio(i,k,iNH4_)=Bio(i,k,iNH4_)+ResPS*(1.0_r8-RnewS)
+
+#if defined N15
+              cff_iso3=cff4
+              Bio(i,k,iSphy15)=Bio(i,k,iSphy15)/(1.0_r8+cff_iso3)
+              Bio(i,k,iNO315_)=Bio(i,k,iNO315_)+                        &
+     &                         ((cff_iso3*Bio(i,k,iSphy15))*RnewS)
+              Bio(i,k,iNH415_)=Bio(i,k,iNH415_)+                        &
+     &                         ((cff_iso3*Bio(i,k,iSphy15))*            &
+     &                         (1.0_r8-RnewS))
+              Bio(i,k,iSphy14)=Bio(i,k,iSphy14)/(1.0_r8+cff_iso3)
+              Bio(i,k,iNO314_)=Bio(i,k,iNO314_)+                        &
+     &                         ((cff_iso3*Bio(i,k,iSphy14))*RnewS)
+              Bio(i,k,iNH414_)=Bio(i,k,iNH414_)+                        &
+     &                         ((cff_iso3*Bio(i,k,iSphy14))*            &
+     &                         (1.0_r8-RnewS))
+#endif
+
+#if defined OXY
+!OX1.1.3
+              Bio(i,k,iOxyg)=Bio(i,k,iOxyg)-ResPS*(RnewS*rOxNO3+        &
+     &                                    (1.0_r8-RnewS)*rOxNH4)
+#endif
+#if defined CARB & ! defined KO02
+!C1.1.2
+              Bio(i,k,iTIC_)=Bio(i,k,iTIC_)+RedCN(ng)*ResPS
+#endif
+
+#ifdef N15_CHECKS_BIOTOY2
+              IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                d15N_phyto=(((Bio(i,k,iSphy15)/Bio(i,k,iSphy14))/Rstd)-1)*1000
+                d15N_phyto_change=d15N_phyto-d15N_phyto_old
+                d15N_phyto_old=d15N_phyto
+                d15N_DON_old=(((Bio(i,k,iDON15_)/Bio(i,k,iDON14_))/Rstd)-1)*1000
+                print *, "after phytoplankton respiration d15N Sphy change=", d15N_phyto_change
+              ENDIF
+#endif
+
+
+!
+!  Small Phytoplankton extracellular excrection rate, ExcPS, assumed to
+!  be proportional to production.
+!
+              ExcPS=GppPS*GammaS(ng)
+#if defined N15_LIM2
+              IF (Bio(i,k,iSphy).LT.lim_min) THEN
+                ExcPS=0.0_r8
+              ENDIF
+#endif
+#if defined N15
+! not calculating implicitly, to match ExcPL, but could modify
+! this line placed up here so can divide by Sphy_old, not Sphy_new
+              IF (Bio(i,k,iSphy).GT.0.0_r8) THEN
+                ExcPS15=ExcPS*(Bio(i,k,iSphy15)/Bio(i,k,iSphy))
+                ExcPS14=ExcPS-ExcPS15
+              ELSE
+                ExcPS15=0.0_r8
+                ExcPS14=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iSphy)=Bio(i,k,iSphy)-ExcPS
+              Bio(i,k,iDON_)=Bio(i,k,iDON_)+ExcPS
+#if defined N15
+              Bio(i,k,iSphy15)=Bio(i,k,iSphy15)-ExcPS15
+              Bio(i,k,iDON15_)=Bio(i,k,iDON15_)+ExcPS15
+              Bio(i,k,iSphy14)=Bio(i,k,iSphy14)-ExcPS14
+              Bio(i,k,iDON14_)=Bio(i,k,iDON14_)+ExcPS14
+#endif
+
+#ifdef N15_CHECKS_BIOTOY2
+              IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                d15N_phyto=(((Bio(i,k,iSphy15)/Bio(i,k,iSphy14))/Rstd)-1)*1000
+                d15N_phyto_change=d15N_phyto-d15N_phyto_old
+                d15N_phyto_old=d15N_phyto
+                d15N_DON=(((Bio(i,k,iDON15_)/Bio(i,k,iDON14_))/Rstd)-1)*1000
+                print *, "after phytoplankton excretion d15N Sphy change=", d15N_phyto_change
+                print *, "after phytoplankton excretion d15N DON change=", d15N_DON-d15N_DON_old
+
+              ENDIF
+#endif
+            END DO
+          END DO
+!
+!  Gross primary production of Large Phytoplankton consisting of
+!  nutrient uptake (NO3, NH4, Silicate) terms, temperature-dependend
+!  term, and light limitation term. Notice that there is a silicate
+!  limiting term (which complicates the implicit algorithm). Again,
+!  the Michaelis-Menten curve is used to describe the change in
+!  uptake rate as a function of nutrient concentration.
+!
+          cff=dtdays*VmaxL(ng)
+          fac1=1.0/RSiN(ng)
+          fac2=dtdays*ResPL0(ng)
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+!
+!  Large Phytoplankton gross primary productivity, GppPL. Notice that
+!  the primary productivity is limited by previous time-step silicate
+!  concentration.
+!
+              cff1=cff*EXP(KGppL(ng)*Bio(i,k,itemp))*LightL(i,k)*       &
+     &             Bio(i,k,iLphy)
+#if defined VALLINA
+              cff2=(1.0_r8-                                             &
+     &             (Bio(i,k,iNH4_)/(Bio(i,k,iNH4_)+KNH4L(ng))))/        &
+     &             (KNO3L(ng)+Bio(i,k,iNO3_))
+#else
+              cff2=EXP(-PusaIL(ng)*Bio(i,k,iNH4_))/                     &
+     &             (KNO3L(ng)+Bio(i,k,iNO3_))
+#endif
+              cff3=1.0_r8/(KNH4L(ng)+Bio(i,k,iNH4_))
+              cff4=cff2*Bio(i,k,iNO3_)
+              cff5=cff3*Bio(i,k,iNH4_)
+              cff6=Bio(i,k,iSiOH)/(KSiL(ng)+Bio(i,k,iSiOH))
+              cff7=cff6/MAX(MinVal,cff4+cff5)
+              cff4=cff1*cff2*MIN(1.0_r8,cff7)     ! Si limitation on N03
+              cff5=cff1*cff3*MIN(1.0_r8,cff7)     ! Si limitation on NH4
+#if defined N15_LIM2
+              IF (Bio(i,k,iNO3_).LT.lim_min) THEN
+                cff4=0.0_r8
+              ENDIF
+#endif
+#if defined N15_LIM2
+              IF (Bio(i,k,iNH4_).LT.lim_min) THEN
+                cff5=0.0_r8
+              ENDIF
+#endif
+#if defined N15
+              NO3_old=Bio(i,k,iNO3_)
+              NH4_old=Bio(i,k,iNH4_)
+#endif
+              Bio(i,k,iNO3_)=Bio(i,k,iNO3_)/(1.0_r8+cff4)
+              Bio(i,k,iNH4_)=Bio(i,k,iNH4_)/(1.0_r8+cff5)
+              GppNPL=Bio(i,k,iNO3_)*cff4
+              GppAPL=Bio(i,k,iNH4_)*cff5
+              GppPL=GppNPL+GppAPL
+              Bio(i,k,iLphy)=Bio(i,k,iLphy)+GppPL
+              Bio(i,k,iSiOH)=Bio(i,k,iSiOH)-GppPL*RSiN(ng)
+#if defined N15
+              IF (NO3_old.GT.0.0_r8) THEN
+                epsilon_NO3=eps_GppNO3(ng)*                           &
+     &                      (1.0_r8-(GppNPL/NO3_old))
+              ELSE
+                epsilon_NO3=0.0_r8
+              ENDIF
+              IF (NH4_old.GT.0.0_r8) THEN
+                epsilon_NH4=eps_GppNH4(ng)*                           &
+     &                        (1.0_r8-(GppAPL/NH4_old))
+              ELSE
+                epsilon_NH4=0.0_r8
+              ENDIF
+              gamma_NO3=1.0_r8-(epsilon_NO3/1000.0_r8)
+              gamma_NH4=1.0_r8-(epsilon_NH4/1000.0_r8)
+              IF ((Bio(i,k,iNO3_).GT.0.0_r8) .AND.                    &
+     &            (Bio(i,k,iNO315_).GT.0.0_r8) .AND.                  &
+     &            (Bio(i,k,iNO314_).GT.0.0_r8)) THEN
+                GppNPL15=GppNPL*(gamma_NO3*(Bio(i,k,iNO315_)            &
+     &                   /Bio(i,k,iNO314_)))/(1.0_r8+(gamma_NO3*        &
+     &                   (Bio(i,k,iNO315_)/Bio(i,k,iNO314_))))
+                GppNPL14=GppNPL-GppNPL15
+              ELSE
+                GppNPL15=0.0_r8
+                GppNPL14=0.0_r8
+              ENDIF
+              IF ((Bio(i,k,iNH4_).GT.0.0_r8) .AND.                      &
+     &            (Bio(i,k,iNH415_).GT.0.0_r8) .AND.                    &
+     &            (Bio(i,k,iNH414_).GT.0.0_r8)) THEN
+                GppAPL15=GppAPL*(gamma_NH4*(Bio(i,k,iNH415_)            &
+     &                   /Bio(i,k,iNH414_)))/(1.0_r8+(gamma_NH4*        &
+     &                   (Bio(i,k,iNH415_)/Bio(i,k,iNH414_))))
+                GppAPL14=GppAPL-GppAPL15
+              ELSE
+                GppAPL15=0.0_r8
+                GppAPL14=0.0_r8
+              ENDIF
+              GppPL15=GppNPL15+GppAPL15
+              GppPL14=GppNPL14+GppAPL14
+              Bio(i,k,iNO315_)=Bio(i,k,iNO315_)-GppNPL15
+              Bio(i,k,iNH415_)=Bio(i,k,iNH415_)-GppAPL15
+              Bio(i,k,iLphy15)=Bio(i,k,iLphy15)+GppPL15
+              Bio(i,k,iNO314_)=Bio(i,k,iNO314_)-GppNPL14
+              Bio(i,k,iNH414_)=Bio(i,k,iNH414_)-GppAPL14
+              Bio(i,k,iLphy14)=Bio(i,k,iLphy14)+GppPL14
+#endif
+#if defined OXY
+!OX1.1.4
+              Bio(i,k,iOxyg)=Bio(i,k,iOxyg)+GppNPL*rOxNO3+GppAPL*rOxNH4
+#endif
+#if defined CARB & ! defined KO03
+!C1.1.3
+              cffC=(1.0_r8+0.07_r8)*RedCN(ng)*GppPL/                    &
+     &                    MAX(MinVal,Bio(i,k,iTIC_))
+              Bio(i,k,iTIC_)=Bio(i,k,iTIC_)/(1.0_r8+cffC)
+              Bio(i,k,iTAlk)=Bio(i,k,iTAlk)+GppNPL
+              cffC=2.0_r8*0.07_r8*RedCN(ng)*GppPL/                      &
+     &                  MAX(MinVal,Bio(i,k,iTAlk))
+              Bio(i,k,iTAlk)=Bio(i,k,iTAlk)/(1.0_r8+cffC)
+              Bio(i,k,iCalC)=Bio(i,k,iCalC)+0.07_r8*RedCN(ng)*GppPL
+#endif
+
+!
+!  Large Phytoplankton respiration rate, ResPL, assumed to be
+!  proportional to biomass. Use ratio of NO3 uptake to total uptake
+!  (NO3 + NH4) to compute respiration contributions. Use Si:N ratio to
+!  compute SiOH4 contribution.
+!
+!search: do I want nemuro code mod5?
+!no, assim related
+              RnewL=GppNPL/MAX(MinVal,GppPL)
+              cff7=fac2*EXP(KResPL(ng)*Bio(i,k,itemp))
+#if defined N15_LIM2
+              IF (Bio(i,k,iLphy).LT.lim_min) THEN
+                cff7=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iLphy)=Bio(i,k,iLphy)/(1.0_r8+cff7)
+              ResPL=Bio(i,k,iLphy)*cff7
+              Bio(i,k,iNO3_)=Bio(i,k,iNO3_)+ResPL*RnewL
+              Bio(i,k,iNH4_)=Bio(i,k,iNH4_)+ResPL*(1.0_r8-RnewL)
+              Bio(i,k,iSiOH)=Bio(i,k,iSiOH)+ResPL*RSiN(ng)
+
+#if defined N15
+              cff_iso3=cff7
+              Bio(i,k,iLphy15)=Bio(i,k,iLphy15)/(1.0_r8+cff_iso3)
+              Bio(i,k,iNO315_)=Bio(i,k,iNO315_)+                        &
+     &                         ((cff_iso3*Bio(i,k,iLphy15))*RnewL)
+              Bio(i,k,iNH415_)=Bio(i,k,iNH415_)+                        &
+     &                         ((cff_iso3*Bio(i,k,iLphy15))*            &
+     &                         (1.0_r8-RnewL))
+              Bio(i,k,iLphy14)=Bio(i,k,iLphy14)/(1.0_r8+cff_iso3)
+              Bio(i,k,iNO314_)=Bio(i,k,iNO314_)+                        &
+     &                         ((cff_iso3*Bio(i,k,iLphy14))*RnewL)
+              Bio(i,k,iNH414_)=Bio(i,k,iNH414_)+                        &
+     &                         ((cff_iso3*Bio(i,k,iLphy14))*            &
+     &                         (1.0_r8-RnewL))
+#endif
+
+#if defined OXY
+!OX1.1.5
+              Bio(i,k,iOxyg)=Bio(i,k,iOxyg)-ResPL*(RnewL*rOxNO3+        &
+     &                                    (1.0_r8-RnewL)*rOxNH4)
+#endif
+#if defined CARB & ! defined KO04
+!C1.1.4
+              Bio(i,k,iTIC_)=Bio(i,k,iTIC_)+RedCN(ng)*ResPL
+#endif
+
+!
+!  Large Phytoplankton extracellular excrection rate, ExcPL, assumed to
+!  be proportional to production.
+!
+              ExcPL=GppPL*GammaL(ng)
+#if defined N15_LIM2
+              IF (Bio(i,k,iLphy).LT.lim_min) THEN
+                ExcPL=0.0_r8
+              ENDIF
+#endif
+#if defined N15
+              IF (Bio(i,k,iLphy).GT.0.0_r8) THEN
+                ExcPL15=ExcPL*(Bio(i,k,iLphy15)/Bio(i,k,iLphy))
+                ExcPL14=ExcPL-ExcPL15
+              ELSE
+                ExcPL15=0.0_r8
+                ExcPL14=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iLphy)=Bio(i,k,iLphy)-ExcPL
+              Bio(i,k,iDON_)=Bio(i,k,iDON_)+ExcPL
+              Bio(i,k,iSiOH)=Bio(i,k,iSiOH)+ExcPL*RSiN(ng)
+#if defined N15
+              Bio(i,k,iLphy15)=Bio(i,k,iLphy15)-ExcPL15
+              Bio(i,k,iDON15_)=Bio(i,k,iDON15_)+ExcPL15
+              Bio(i,k,iLphy14)=Bio(i,k,iLphy14)-ExcPL14
+              Bio(i,k,iDON14_)=Bio(i,k,iDON14_)+ExcPL14
+#endif
+
+            END DO
+          END DO
+
+!
+!-----------------------------------------------------------------------
+!  Phytoplankton mortality to particulate organic nitrogen.
+!-----------------------------------------------------------------------
+!
+!search:a bunch of stuff for NEM_SPONGE goes here in Chris's version. ask about
+!Add NEM_SPONGE, deals with boundary issues
+#ifdef NEM_SPONGE
+          nbfr=NemSpongeN(ng)
+          nemfac=NemSpongeF(ng)-1.0_r8    ! subtract 1 because we add it back later
+          DO i=Istr,Iend
+            mortfac(i)=1.0_r8
+          END DO
+          ! handle western boundary
+          DO i=Istr,MIN(nbfr,Iend)
+            cff1=1.0_r8+nemfac*REAL(nbfr-i,r8)/REAL(nbfr,r8)
+            mortfac(i)=MAX(mortfac(i),cff1)
+          END DO
+          ! handle eastern boundary
+          DO i=MAX(Istr,Lm(ng)+1-nbfr),Iend
+            cff1=1.0_r8+nemfac*REAL(i-(Lm(ng)+1-nbfr),r8)/REAL(nbfr,r8)
+            mortfac(i)=MAX(mortfac(i),cff1)
+          END DO
+          ! handle southern and northern boundaries
+          DO i=Istr,Iend
+            cff1=1.0_r8+nemfac*REAL(nbfr-j,r8)/REAL(nbfr,r8)
+            mortfac(i)=MAX(mortfac(i),cff1)
+            cff1=1.0_r8+nemfac*REAL(j-(Mm(ng)+1-nbfr),r8)/REAL(nbfr,r8)
+            mortfac(i)=MAX(mortfac(i),cff1)
+          END DO
+#endif
+
+! Check d15N values of PON
+#ifdef N15_CHECKS_BIOTOY
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+
+# ifdef MASKING
+            IF (rmask(i,j).EQ.1) THEN
+# endif
+             IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+               d15N=(((Bio(i,k,iPON15_)/Bio(i,k,iPON14_))/Rstd)-1)*1000
+               d15N_change=d15N-d15N_old
+               d15N_old=d15N
+               print *, "before phytoplankton mortality d15N PON=", d15N_change
+             ENDIF
+# ifdef MASKING
+            ENDIF
+# endif
+          END DO
+        END DO
+#endif
+
+          fac1=dtdays*MorPS0(ng)
+          fac2=dtdays*MorPL0(ng)
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+              cff1=fac1*Bio(i,k,iSphy)*EXP(KMorPS(ng)*Bio(i,k,itemp))
+              cff2=fac2*Bio(i,k,iLphy)*EXP(KMorPL(ng)*Bio(i,k,itemp))
+#ifdef NEM_SPONGE
+              cff1=cff1*mortfac(i)
+              cff2=cff2*mortfac(i)
+#endif
+#if defined N15_LIM2
+              IF (Bio(i,k,iSphy).LT.lim_min) THEN
+                cff1=0.0_r8
+              ENDIF
+              IF (Bio(i,k,iLphy).LT.lim_min) THEN
+                cff2=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iSphy)=Bio(i,k,iSphy)/(1.0_r8+cff1)
+              Bio(i,k,iLphy)=Bio(i,k,iLphy)/(1.0_r8+cff2)
+              MorPS=Bio(i,k,iSphy)*cff1
+              MorPL=Bio(i,k,iLphy)*cff2
+              Bio(i,k,iPON_)=Bio(i,k,iPON_)+MorPS+MorPL
+              Bio(i,k,iopal)=Bio(i,k,iopal)+MorPL*RSiN(ng)
+#if defined N15
+              cff_iso1=cff1
+              cff_iso2=cff2
+              Bio(i,k,iSphy15)=Bio(i,k,iSphy15)/(1.0_r8+cff_iso1)
+              Bio(i,k,iLphy15)=Bio(i,k,iLphy15)/(1.0_r8+cff_iso2)
+              MorPS15=cff_iso1*Bio(i,k,iSphy15)
+              MorPL15=cff_iso2*Bio(i,k,iLphy15)
+              Bio(i,k,iPON15_)=Bio(i,k,iPON15_)+MorPS15+MorPL15
+              Bio(i,k,iSphy14)=Bio(i,k,iSphy14)/(1.0_r8+cff_iso1)
+              Bio(i,k,iLphy14)=Bio(i,k,iLphy14)/(1.0_r8+cff_iso2)
+              MorPS14=cff_iso1*Bio(i,k,iSphy14)
+              MorPL14=cff_iso2*Bio(i,k,iLphy14)
+              Bio(i,k,iPON14_)=Bio(i,k,iPON14_)+MorPS14+MorPL14
+#endif
+#ifdef N15_CHECKS_BIOTOY2
+              IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                d15N_phyto=(((Bio(i,k,iSphy15)/Bio(i,k,iSphy14))/Rstd)-1)*1000
+                d15N_phyto_change=d15N_phyto-d15N_phyto_old
+                d15N_phyto_old=d15N_phyto
+                print *, "after phytoplankton mortality d15N Sphy change=", d15N_phyto_change
+              ENDIF
+#endif
+
+            END DO
+
+          END DO
+
+! Check d15N valus of PON
+#ifdef N15_CHECKS_BIOTOY
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+# ifdef MASKING
+            IF (rmask(i,j).EQ.1) THEN
+# endif
+             IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+               d15N=(((Bio(i,k,iPON15_)/Bio(i,k,iPON14_))/Rstd)-1)*1000
+               d15N_change=d15N-d15N_old
+               d15N_old=d15N
+               print *, "after phyto mortality/before zoo ege d15N PON=", d15N_change
+             ENDIF
+# ifdef MASKING
+            ENDIF
+# endif
+          END DO
+        END DO
+#endif
+
+!
+!-----------------------------------------------------------------------
+!  Zooplankton grazing, egestion and excretion.
+!-----------------------------------------------------------------------
+
+#if defined IVLEV_EXPLICIT
+!
+!  The rate of grazing by the zooplankton is modeled using an Ivlev
+!  equation with a feeding threshold using an explicit (non-conserving)
+!  algorithm to the original formulation. Notice that term is forced to
+!  be positive using a MAX function.
+!
+#elif defined HOLLING_GRAZING
+!
+!  The rate of grazing by the zooplankton is modeled using a Holling-
+!  type s-shaped curve. It is known to be numerically more stable and
+!  allows an implicit discretization.
+!
+!    P(new) = P(old) - dt*mu*[P(old)/(Kp + P(old)^2)]*P(new)*Z(old)
+!
+!  The implicit grazing term is then:
+!
+!    P(new) = P(old) / (1 + G)
+!
+!  where the grazing rate, G, is:
+!
+!    G = dt * mu * [P(old)/(Kp + P(old)^2)] * Z(old)
+!
+#else
+# define IVLEV_IMPLICIT
+!
+!  The rate of grazing by the zooplankton is modeled using an Ivlev
+!  equation with a feeding threshold. An implicit algorithm is
+!  achieved by multiplying grazing term by a unity factor, alpha:
+!
+!    alpha = 1 = P(new)/(P(old)+deltaP)
+!
+!  where
+!
+!    deltaP = P(new) - P(old) = - dt*mu*[1-EXP(lambda*P(old))]
+!
+!  The factor alpha can be approximated using Taylor series to:
+!
+!    alpha = [P(new) / P(old)] * [1 - deltaP/P(old)]
+!
+!  The discretized grazing term is then:
+!
+!    P(new) = P(old) - dt*mu*[1-EXP(lambda*P)] * alpha * Z(old)
+!
+!  Which can be approximated with an implicit algorithm to:
+!
+!    P(new) = P(old) / (1 + G)
+!
+!  were the grazing rate, G, is:
+!
+!    G = [1 + P(old)/(dt*mu*(1 - EXP(lambda*P(old))))] * Z(old)
+!
+#endif
+          fac1=dtdays*GRmaxSps(ng)
+          fac2=dtdays*GRmaxLps(ng)
+          fac3=dtdays*GRmaxLpl(ng)
+          fac4=dtdays*GRmaxLzs(ng)
+          fac5=dtdays*GRmaxPpl(ng)
+          fac6=dtdays*GRmaxPzs(ng)
+          fac7=dtdays*GRmaxPzl(ng)
+#if defined NEMUCSC
+          fac8=dtdays*GRmaxSpl(ng)
+#endif
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+!
+!  Temperature-dependent term (Q10).
+!
+              cff1=EXP(KGraS(ng)*Bio(i,k,itemp))
+              cff2=EXP(KGraL(ng)*Bio(i,k,itemp))
+              cff3=EXP(KGraP(ng)*Bio(i,k,itemp))
+!
+!  Small Zooplankton grazing on Small Phytoplankton, GraPS2ZS.
+!
+#if defined IVLEV_EXPLICIT
+              cff4=1.0_r8-EXP(LamS(ng)*(PS2ZSstar(ng)-Bio(i,k,iSphy)))
+              GraPS2ZS=fac1*cff1*MAX(0.0_r8,cff4)*Bio(i,k,iSzoo)
+# if defined N15
+              IF (Bio(i,k,iSphy).GT.0.0_r8) THEN
+                GraPS2ZS15=GraPS2ZS*(Bio(i,k,iSphy15)/Bio(i,k,iSphy))
+              ELSE
+                GraPS2ZS15=0.0_r8
+              ENDIF
+# endif
+              Bio(i,k,iSphy)=Bio(i,k,iSphy)-GraPS2ZS
+              Bio(i,k,iSzoo)=Bio(i,k,iSzoo)+GraPS2ZS
+# if defined N15
+              Bio(i,k,iSphy15)=Bio(i,k,iSphy15)-GraPS2ZS15
+              Bio(i,k,iSzoo15)=Bio(i,k,iSzoo15)+GraPS2ZS15
+              Bio(i,k,iSphy14)=Bio(i,k,iSphy)-Bio(i,k,iSphy15)
+              Bio(i,k,iSzoo14)=Bio(i,k,iSzoo)-Bio(i,k,iSzoo15)
+# endif
+
+# ifdef N15_CHECKS_BIOTOY2
+              IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                d15N_phyto=(((Bio(i,k,iSphy15)/Bio(i,k,iSphy14))/Rstd)-1)*1000
+                d15N_phyto_change=d15N_phyto-d15N_phyto_old
+                d15N_phyto_old=d15N_phyto
+                print *, "after Szoo grazing (ivlev explicit) d15N Sphy change=", d15N_phyto_change
+              ENDIF
+# endif
+
+#else
+# ifdef HOLLING_GRAZING
+              cff4=1.0_r8/(KPS2ZS(ng)+Bio(i,k,iSphy)*Bio(i,k,iSphy))
+              cff=fac1*cff1*cff4*Bio(i,k,iSzoo)*Bio(i,k,iSphy)
+# elif defined IVLEV_IMPLICIT
+              cff4=1.0_r8-EXP(LamS(ng)*(PS2ZSstar(ng)-Bio(i,k,iSphy)))
+              cff5=1.0_r8/(fac1*cff4)
+              cff=(1.0_r8+Bio(i,k,iSphy)*cff5)*cff1*Bio(i,k,iSzoo)
+# endif
+#if defined N15_LIM2
+              IF (Bio(i,k,iSphy).LT.lim_min) THEN
+                cff=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iSphy)=Bio(i,k,iSphy)/(1.0_r8+cff)
+              GraPS2ZS=cff*Bio(i,k,iSphy)
+              Bio(i,k,iSzoo)=Bio(i,k,iSzoo)+GraPS2ZS
+# if defined N15
+              cff_iso1=cff
+              Bio(i,k,iSphy15)=Bio(i,k,iSphy15)/(1.0_r8+cff_iso1)
+              Bio(i,k,iSzoo15)=Bio(i,k,iSzoo15)+(cff_iso1*Bio(i,k,iSphy15))
+              Bio(i,k,iSphy14)=Bio(i,k,iSphy)-Bio(i,k,iSphy15)
+              Bio(i,k,iSzoo14)=Bio(i,k,iSzoo)-Bio(i,k,iSzoo15)
+# endif
+
+# ifdef N15_CHECKS_BIOTOY2
+              IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                d15N_phyto=(((Bio(i,k,iSphy15)/Bio(i,k,iSphy14))/Rstd)-1)*1000
+                d15N_phyto_change=d15N_phyto-d15N_phyto_old
+                d15N_phyto_old=d15N_phyto
+                print *, "after Szoo grazing (ivlev implicit or holling) d15N Sphy change=", d15N_phyto_change
+              ENDIF
+# endif
+
+#endif
+
+#if defined NEMUCSC
+!
+!  Small Zooplankton grazing on Large Phytoplankton, GraPL2ZS.
+!
+# if defined IVLEV_EXPLICIT
+              cff4=1.0_r8-EXP(LamL(ng)*(PL2ZSstar(ng)-Bio(i,k,iLphy)))
+              GraPL2ZS=fac8*cff2*MAX(0.0_r8,cff4)*Bio(i,k,iSzoo)
+# if defined N15
+              IF (Bio(i,k,iLphy).GT.0.0_r8) THEN
+                GraPL2ZS15=GraPL2ZS*(Bio(i,k,iLphy15)/Bio(i,k,iLphy))
+              ELSE
+                GraPL2ZS15=0.0_r8
+              ENDIF
+# endif
+              Bio(i,k,iLphy)=Bio(i,k,iLphy)-GraPL2ZS
+              Bio(i,k,iSzoo)=Bio(i,k,iSzoo)+GraPL2ZS
+#  if defined N15
+              Bio(i,k,iLphy15)=Bio(i,k,iLphy15)-GraPL2ZS15
+              Bio(i,k,iSzoo15)=Bio(i,k,iSzoo15)+GraPL2ZS15
+              Bio(i,k,iLphy14)=Bio(i,k,iLphy)-Bio(i,k,iLphy15)
+              Bio(i,k,iSzoo14)=Bio(i,k,iSzoo)-Bio(i,k,iSzoo15)
+#  endif
+# else
+#  ifdef HOLLING_GRAZING
+              cff4=1.0_r8/(KPL2ZS(ng)+Bio(i,k,iLphy)*Bio(i,k,iLphy))
+              cff=fac8*cff2*cff4*Bio(i,k,iSzoo)*Bio(i,k,iLphy)
+#  elif defined IVLEV_IMPLICIT
+              cff4=1.0_r8-EXP(LamL(ng)*(PL2ZSstar(ng)-Bio(i,k,iLphy)))
+              cff5=1.0_r8/(fac8*cff4)
+              cff=(1.0_r8+Bio(i,k,iLphy)*cff5)*cff2*Bio(i,k,iSzoo)
+#  endif
+# if defined N15_LIM2
+              IF (Bio(i,k,iLphy).LT.lim_min) THEN
+                cff=0.0_r8
+              ENDIF
+# endif
+              Bio(i,k,iLphy)=Bio(i,k,iLphy)/(1.0_r8+cff)
+              GraPL2ZS=cff*Bio(i,k,iLphy)
+              Bio(i,k,iSzoo)=Bio(i,k,iSzoo)+GraPL2ZS
+#  if defined N15
+              cff_iso1=cff
+              Bio(i,k,iLphy15)=Bio(i,k,iLphy15)/(1.0_r8+cff_iso1)
+              Bio(i,k,iSzoo15)=Bio(i,k,iSzoo15)+(cff_iso1*Bio(i,k,iLphy15))
+              Bio(i,k,iLphy14)=Bio(i,k,iLphy)-Bio(i,k,iLphy15)
+              Bio(i,k,iSzoo14)=Bio(i,k,iSzoo)-Bio(i,k,iSzoo15)
+#  endif
+# endif
+#endif
+
+!
+!  Large Zooplankton grazing on Small Phytoplankton, GraPS2ZL.
+!
+#if defined IVLEV_EXPLICIT
+              cff4=1.0_r8-EXP(LamL(ng)*(PS2ZLstar(ng)-Bio(i,k,iSphy)))
+              GraPS2ZL=fac2*cff2*MAX(0.0_r8,cff4)*Bio(i,k,iLzoo)
+# if defined N15
+              IF (Bio(i,k,iSphy).GT.0.0_r8) THEN
+                GraPS2ZL15=GraPS2ZL*(Bio(i,k,iSphy15)/Bio(i,k,iSphy))
+              ELSE
+                GraPS2ZL15=0.0_r8
+              ENDIF
+# endif
+              Bio(i,k,iSphy)=Bio(i,k,iSphy)-GraPS2ZL
+              Bio(i,k,iLzoo)=Bio(i,k,iLzoo)+GraPS2ZL
+# if defined N15
+              Bio(i,k,iSphy15)=Bio(i,k,iSphy15)-GraPS2ZL15
+              Bio(i,k,iLzoo15)=Bio(i,k,iLzoo15)+GraPS2ZL15
+              Bio(i,k,iSphy14)=Bio(i,k,iSphy)-Bio(i,k,iSphy15)
+              Bio(i,k,iLzoo14)=Bio(i,k,iLzoo)-Bio(i,k,iLzoo15)
+# endif
+# ifdef N15_CHECKS_BIOTOY2
+              IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                d15N_phyto=(((Bio(i,k,iSphy15)/Bio(i,k,iSphy14))/Rstd)-1)*1000
+                d15N_phyto_change=d15N_phyto-d15N_phyto_old
+                d15N_phyto_old=d15N_phyto
+                print *, "after Lzoo grazing (ivlev explicit) d15N Sphy change=", d15N_phyto_change
+              ENDIF
+# endif
+
+
+#else
+# ifdef HOLLING_GRAZING
+              cff4=1.0_r8/(KPS2ZL(ng)+Bio(i,k,iSphy)*Bio(i,k,iSphy))
+              cff=fac2*cff2*cff4*Bio(i,k,iLzoo)*Bio(i,k,iSphy)
+# elif defined IVLEV_IMPLICIT
+              cff4=1.0_r8-EXP(LamL(ng)*(PS2ZLstar(ng)-Bio(i,k,iSphy)))
+              cff5=1.0_r8/(fac2*cff4)
+              cff=(1.0_r8+Bio(i,k,iSphy)*cff5)*cff2*Bio(i,k,iLzoo)
+# endif
+#if defined N15_LIM2
+              IF (Bio(i,k,iSphy).LT.lim_min) THEN
+                cff=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iSphy)=Bio(i,k,iSphy)/(1.0_r8+cff)
+              GraPS2ZL=cff*Bio(i,k,iSphy)
+              Bio(i,k,iLzoo)=Bio(i,k,iLzoo)+GraPS2ZL
+# if defined N15
+              cff_iso2=cff
+              Bio(i,k,iSphy15)=Bio(i,k,iSphy15)/(1.0_r8+cff_iso2)
+              Bio(i,k,iLzoo15)=Bio(i,k,iLzoo15)+(cff_iso2*Bio(i,k,iSphy15))
+              Bio(i,k,iSphy14)=Bio(i,k,iSphy)-Bio(i,k,iSphy15)
+              Bio(i,k,iLzoo14)=Bio(i,k,iLzoo)-Bio(i,k,iLzoo15)
+# endif
+
+# ifdef N15_CHECKS_BIOTOY2
+              IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                d15N_phyto=(((Bio(i,k,iSphy15)/Bio(i,k,iSphy14))/Rstd)-1)*1000
+                d15N_phyto_change=d15N_phyto-d15N_phyto_old
+                d15N_phyto_old=d15N_phyto
+                print *, "after Lzoo grazing (ivlev implicit or holling) d15N Sphy change=", d15N_phyto_change
+              ENDIF
+# endif
+
+#endif
+
+!
+!  Large Zooplankton grazing on Large Phytoplankton, GraPL2ZL.
+!
+#if defined IVLEV_EXPLICIT
+              cff4=1.0_r8-EXP(LamL(ng)*(PL2ZLstar(ng)-Bio(i,k,iLphy)))
+# if defined N15
+              IF (Bio(i,k,iLphy).GT.0.0_r8) THEN
+                GraPL2ZL15=GraPL2ZL*(Bio(i,k,iLphy15)/Bio(i,k,iLphy))
+              ELSE
+                GraPL2ZL15=0.0_r8
+              ENDIF
+# endif
+              GraPL2ZL=fac3*cff2*MAX(0.0_r8,cff4)*Bio(i,k,iLzoo)
+              Bio(i,k,iLphy)=Bio(i,k,iLphy)-GraPL2ZL
+              Bio(i,k,iLzoo)=Bio(i,k,iLzoo)+GraPL2ZL
+# if defined N15
+              Bio(i,k,iLphy15)=Bio(i,k,iLphy15)-GraPL2ZL15
+              Bio(i,k,iLzoo15)=Bio(i,k,iLzoo15)+GraPL2ZL15
+              Bio(i,k,iLphy14)=Bio(i,k,iLphy)-Bio(i,k,iLphy15)
+              Bio(i,k,iLzoo14)=Bio(i,k,iLzoo)-Bio(i,k,iLzoo15)
+# endif
+#else
+# ifdef HOLLING_GRAZING
+              cff4=1.0_r8/(KPL2ZL(ng)+Bio(i,k,iLphy)*Bio(i,k,iLphy))
+              cff=fac3*cff2*cff4*Bio(i,k,iLzoo)*Bio(i,k,iLphy)
+# elif defined IVLEV_IMPLICIT
+              cff4=1.0_r8-EXP(LamL(ng)*(PL2ZLstar(ng)-Bio(i,k,iLphy)))
+              cff5=1.0_r8/(fac3*cff4)
+              cff=(1.0_r8+Bio(i,k,iLphy)*cff5)*cff2*Bio(i,k,iLzoo)
+# endif
+#if defined N15_LIM2
+              IF (Bio(i,k,iLphy).LT.lim_min) THEN
+                cff=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iLphy)=Bio(i,k,iLphy)/(1.0_r8+cff)
+              GraPL2ZL=cff*Bio(i,k,iLphy)
+              Bio(i,k,iLzoo)=Bio(i,k,iLzoo)+GraPL2ZL
+# if defined N15
+              cff_iso3=cff
+              Bio(i,k,iLphy15)=Bio(i,k,iLphy15)/(1.0_r8+cff_iso3)
+              Bio(i,k,iLzoo15)=Bio(i,k,iLzoo15)+(cff_iso3*Bio(i,k,iLphy15))
+              Bio(i,k,iLphy14)=Bio(i,k,iLphy)-Bio(i,k,iLphy15)
+              Bio(i,k,iLzoo14)=Bio(i,k,iLzoo)-Bio(i,k,iLzoo15)
+# endif
+#endif
+
+!
+!  Large Zooplankton grazing on Small Zooplankton, GraZS2ZL.
+!
+#if defined IVLEV_EXPLICIT
+              cff4=1.0_r8-EXP(LamL(ng)*(ZS2ZLstar(ng)-Bio(i,k,iSzoo)))
+              GraZS2ZL=fac4*cff2*MAX(0.0_r8,cff4)*Bio(i,k,iLzoo)
+# if defined N15
+              IF (Bio(i,k,iSzoo).GT.0.0_r8) THEN
+                GraZS2ZL15=GraZS2ZL*(Bio(i,k,iSzoo15)/Bio(i,k,iSzoo))
+              ELSE
+                GraZS2ZL15=0.0_r8
+              ENDIF
+# endif
+              Bio(i,k,iSzoo)=Bio(i,k,iSzoo)-GraZS2ZL
+              Bio(i,k,iLzoo)=Bio(i,k,iLzoo)+GraZS2ZL
+# if defined N15
+              Bio(i,k,iSzoo15)=Bio(i,k,iSzoo15)-GraZS2ZL15
+              Bio(i,k,iLzoo15)=Bio(i,k,iLzoo15)+GraZS2ZL15
+              Bio(i,k,iSzoo14)=Bio(i,k,iSzoo)-Bio(i,k,iSzoo15)
+              Bio(i,k,iLzoo14)=Bio(i,k,iLzoo)-Bio(i,k,iLzoo15)
+# endif
+#else
+# ifdef HOLLING_GRAZING
+              cff4=1.0_r8/(KZS2ZL(ng)+Bio(i,k,iSzoo)*Bio(i,k,iSzoo))
+              cff=fac4*cff2*cff4*Bio(i,k,iLzoo)*Bio(i,k,iSzoo)
+# elif defined IVLEV_IMPLICIT
+              cff4=1.0_r8-EXP(LamL(ng)*(ZS2ZLstar(ng)-Bio(i,k,iSzoo)))
+              cff5=1.0_r8/(fac4*cff4)
+              cff=(1.0_r8+Bio(i,k,iSphy)*cff5)*cff2*Bio(i,k,iLzoo)
+# endif
+#if defined N15_LIM2
+              IF (Bio(i,k,iSzoo).LT.lim_min) THEN
+                cff=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iSzoo)=Bio(i,k,iSzoo)/(1.0_r8+cff)
+              GraZS2ZL=cff*Bio(i,k,iSzoo)
+              Bio(i,k,iLzoo)=Bio(i,k,iLzoo)+GraZS2ZL
+# if defined N15
+              cff_iso4=cff
+              Bio(i,k,iSzoo15)=Bio(i,k,iSzoo15)/(1.0_r8+cff_iso4)
+              Bio(i,k,iLzoo15)=Bio(i,k,iLzoo15)+(cff_iso4*Bio(i,k,iSzoo15))
+              Bio(i,k,iSzoo14)=Bio(i,k,iSzoo)-Bio(i,k,iSzoo15)
+              Bio(i,k,iLzoo14)=Bio(i,k,iLzoo)-Bio(i,k,iSzoo15)
+# endif
+#endif
+
+!
+!  Predator Zooplankton grazing on Large Phytoplankton, GraPL2ZP.
+!
+#if defined IVLEV_EXPLICIT
+              cff4=1.0_r8-EXP(LamP(ng)*(PL2ZPstar(ng)-Bio(i,k,iLphy)))
+              cff5=EXP(-PusaiPL(ng)*(Bio(i,k,iLzoo)+Bio(i,k,iSzoo)))
+              GraPL2ZP=fac5*cff3*cff5*MAX(0.0_r8,cff4)*Bio(i,k,iPzoo)
+# if defined N15
+              IF (Bio(i,k,iLphy).GT.0.0_r8) THEN
+                GraPL2ZP15=GraPL2ZP*(Bio(i,k,iLphy15)/Bio(i,k,iLphy))
+              ELSE
+                GraPL2ZP15=0.0_r8
+              ENDIF
+# endif
+              Bio(i,k,iLphy)=Bio(i,k,iLphy)-GraPL2ZP
+              Bio(i,k,iPzoo)=Bio(i,k,iPzoo)+GraPL2ZP
+# if defined N15
+              Bio(i,k,iLphy15)=Bio(i,k,iLphy15)-GraPL2ZP15
+              Bio(i,k,iPzoo15)=Bio(i,k,iPzoo15)+GraPL2ZP15
+              Bio(i,k,iLphy14)=Bio(i,k,iLphy)-Bio(i,k,iLphy15)
+              Bio(i,k,iPzoo14)=Bio(i,k,iPzoo)-Bio(i,k,iPzoo15)
+# endif
+#else
+# ifdef HOLLING_GRAZING
+              cff4=1.0_r8/(KPL2ZP(ng)+Bio(i,k,iLphy)*Bio(i,k,iLphy))
+              cff5=EXP(-PusaiPL(ng)*(Bio(i,k,iLzoo)+Bio(i,k,iSzoo)))
+              cff=fac5*cff3*cff4*cff5*Bio(i,k,iPzoo)*Bio(i,k,iLphy)
+# elif defined IVLEV_IMPLICIT
+              cff4=1.0_r8-EXP(LamP(ng)*(PL2ZPstar(ng)-Bio(i,k,iLphy)))
+              cff5=EXP(-PusaiPL(ng)*(Bio(i,k,iLzoo)+Bio(i,k,iSzoo)))
+              cff6=1.0_r8/(fac5*cff4)
+              cff=(1.0_r8+Bio(i,k,iLphy)*cff6)*cff3*cff5*Bio(i,k,iPzoo)
+# endif
+#if defined N15_LIM2
+              IF (Bio(i,k,iLphy).LT.lim_min) THEN
+                cff=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iLphy)=Bio(i,k,iLphy)/(1.0_r8+cff)
+              GraPL2ZP=cff*Bio(i,k,iLphy)
+              Bio(i,k,iPzoo)=Bio(i,k,iPzoo)+GraPL2ZP
+# if defined N15
+              cff_iso5=cff
+              Bio(i,k,iLphy15)=Bio(i,k,iLphy15)/(1.0_r8+cff_iso5)
+              Bio(i,k,iPzoo15)=Bio(i,k,iPzoo15)+(cff_iso5*Bio(i,k,iLphy15))
+              Bio(i,k,iLphy14)=Bio(i,k,iLphy)-Bio(i,k,iLphy15)
+              Bio(i,k,iPzoo14)=Bio(i,k,iPzoo)-Bio(i,k,iPzoo15)
+# endif
+#endif
+
+!
+!  Predatory Zooplankton grazing on Small Zooplankton, GraZS2ZP.
+!
+#if defined IVLEV_EXPLICIT
+              cff4=1.0_r8-EXP(LamP(ng)*(ZS2ZPstar(ng)-Bio(i,k,iSzoo)))
+              cff5=EXP(-PusaiZS(ng)*Bio(i,k,iLzoo))
+              GraZS2ZP=fac6*cff3*cff5*MAX(0.0_r8,cff4)*Bio(i,k,iPzoo)
+# if defined N15
+              IF (Bio(i,k,iSzoo).GT.0.0_r8) THEN
+                GraZS2ZP15=GraZS2ZP*(Bio(i,k,iSzoo15)/Bio(i,k,iSzoo))
+              ELSE
+                GraZS2ZP15=0.0_r8
+              ENDIF
+# endif
+              Bio(i,k,iSzoo)=Bio(i,k,iSzoo)-GraZS2ZP
+              Bio(i,k,iPzoo)=Bio(i,k,iPzoo)+GraZS2ZP
+# if defined N15
+              Bio(i,k,iSzoo15)=Bio(i,k,iSzoo15)-GraZS2ZP15
+              Bio(i,k,iPzoo15)=Bio(i,k,iPzoo15)+GraZS2ZP15
+              Bio(i,k,iSzoo14)=Bio(i,k,iSzoo)-Bio(i,k,iSzoo15)
+              Bio(i,k,iPzoo14)=Bio(i,k,iPzoo)-Bio(i,k,iPzoo15)
+# endif
+#else
+# ifdef HOLLING_GRAZING
+              cff4=1.0_r8/(KZS2ZP(ng)+Bio(i,k,iSzoo)*Bio(i,k,iSzoo))
+              cff5=EXP(-PusaiZS(ng)*Bio(i,k,iLzoo))
+              cff=fac6*cff3*cff4*cff5*Bio(i,k,iPzoo)*Bio(i,k,iSzoo)
+# elif defined IVLEV_IMPLICIT
+              cff4=1.0_r8-EXP(LamP(ng)*(ZS2ZPstar(ng)-Bio(i,k,iSzoo)))
+              cff5=EXP(-PusaiZS(ng)*Bio(i,k,iLzoo))
+              cff6=1.0_r8/(fac6*cff4)
+              cff=(1.0_r8+Bio(i,k,iSzoo)*cff6)*cff3*cff5*Bio(i,k,iPzoo)
+# endif
+#if defined N15_LIM2
+              IF (Bio(i,k,iSzoo).LT.lim_min) THEN
+                cff=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iSzoo)=Bio(i,k,iSzoo)/(1.0_r8+cff)
+              GraZS2ZP=cff*Bio(i,k,iSzoo)
+              Bio(i,k,iPzoo)=Bio(i,k,iPzoo)+GraZS2ZP
+# if defined N15
+              cff_iso6=cff
+              Bio(i,k,iSzoo15)=Bio(i,k,iSzoo15)/(1.0_r8+cff_iso6)
+              Bio(i,k,iPzoo15)=Bio(i,k,iPzoo15)+(cff_iso6*Bio(i,k,iSzoo15))
+              Bio(i,k,iSzoo14)=Bio(i,k,iSzoo)-Bio(i,k,iSzoo15)
+              Bio(i,k,iPzoo14)=Bio(i,k,iPzoo)-Bio(i,k,iPzoo15)
+# endif
+#endif
+
+!
+!  Predatory Zooplankton grazing on Large Zooplankton, GraZL2ZP.
+!
+#if defined IVLEV_EXPLICIT
+              cff4=1.0_r8-EXP(LamP(ng)*(ZL2ZPstar(ng)-Bio(i,k,iLzoo)))
+              GraZL2ZP=fac7*cff3*MAX(0.0_r8,cff4)*Bio(i,k,iPzoo)
+# if defined N15
+              IF (Bio(i,k,iLzoo).GT.0.0_r8) THEN
+                GraZL2ZP15=GraZL2ZP*(Bio(i,k,iLzoo15)/Bio(i,k,iLzoo))
+              ELSE
+                GraZL2ZP15=0.0_r8
+              ENDIF
+# endif
+              Bio(i,k,iLzoo)=Bio(i,k,iLzoo)-GraZL2ZP
+              Bio(i,k,iPzoo)=Bio(i,k,iPzoo)+GraZL2ZP
+# if defined N15
+              Bio(i,k,iLzoo15)=Bio(i,k,iLzoo15)-GraZL2ZP15
+              Bio(i,k,iPzoo15)=Bio(i,k,iPzoo15)+GraZL2ZP15
+              Bio(i,k,iLzoo14)=Bio(i,k,iLzoo)-Bio(i,k,iLzoo15)
+              Bio(i,k,iPzoo14)=Bio(i,k,iPzoo)-Bio(i,k,iPzoo15)
+# endif
+#else
+# ifdef HOLLING_GRAZING
+              cff4=1.0_r8/(KZL2ZP(ng)+Bio(i,k,iLzoo)*Bio(i,k,iLzoo))
+              cff=fac7*cff3*cff4*Bio(i,k,iPzoo)*Bio(i,k,iLzoo)
+# elif defined IVLEV_IMPLICIT
+              cff4=1.0_r8-EXP(LamP(ng)*(ZL2ZPstar(ng)-Bio(i,k,iLzoo)))
+              cff5=1.0_r8/(fac7*cff4)
+              cff=(1.0_r8+Bio(i,k,iLzoo)*cff5)*cff3*Bio(i,k,iPzoo)
+# endif
+#if defined N15_LIM2
+              IF (Bio(i,k,iLzoo).LT.lim_min) THEN
+                cff=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iLzoo)=Bio(i,k,iLzoo)/(1.0_r8+cff)
+              GraZL2ZP=cff*Bio(i,k,iLzoo)
+              Bio(i,k,iPzoo)=Bio(i,k,iPzoo)+GraZL2ZP
+# if defined N15
+              cff_iso7=cff
+              Bio(i,k,iLzoo15)=Bio(i,k,iLzoo15)/(1.0_r8+cff_iso7)
+              Bio(i,k,iPzoo15)=Bio(i,k,iPzoo15)+(cff_iso7*Bio(i,k,iLzoo15))
+              Bio(i,k,iLzoo14)=Bio(i,k,iLzoo)-Bio(i,k,iLzoo15)
+              Bio(i,k,iPzoo14)=Bio(i,k,iPzoo)-Bio(i,k,iPzoo15)
+# endif
+#endif
+
+
+!
+!  Zooplankton egestion to Particulate Organic Nitrogen (PON) and
+!  Particulate Organic Silica (opal).
+!
+!stopping here for switch
+#if defined NEMUCSC
+              EgeZS=(1.0_r8-AlphaZS(ng))*                               &
+     &              (GraPS2ZS+GraPL2ZS)
+#else
+              EgeZS=(1.0_r8-AlphaZS(ng))*                               &
+     &              GraPS2ZS
+#endif
+              EgeZL=(1.0_r8-AlphaZL(ng))*                               &
+     &              (GraPS2ZL+GraPL2ZL+GraZS2ZL)
+              EgeZP=(1.0_r8-AlphaZP(ng))*                               &
+     &              (GraPL2ZP+GraZS2ZP+GraZL2ZP)
+#if defined N15_LIM2
+              IF (Bio(i,k,iSzoo).LT.lim_min) THEN
+                EgeZS=0.0_r8
+              ENDIF
+              IF (Bio(i,k,iLzoo).LT.lim_min) THEN
+                EgeZL=0.0_r8
+              ENDIF
+              IF (Bio(i,k,iPzoo).LT.lim_min) THEN
+                EgeZP=0.0_r8
+              ENDIF
+#endif
+#if defined N15
+              IF (Bio(i,k,iSzoo).GT.0.0_r8) THEN
+                EgeZS15=EgeZS*(Bio(i,k,iSzoo15)/Bio(i,k,iSzoo))
+              ELSE
+                EgeZS15=0.0_r8
+              ENDIF
+              IF (Bio(i,k,iLzoo).GT.0.0_r8) THEN
+                EgeZL15=EgeZL*(Bio(i,k,iLzoo15)/Bio(i,k,iLzoo))
+              ELSE
+                EgeZL15=0.0_r8
+              ENDIF
+              IF (Bio(i,k,iPzoo).GT.0.0_r8) THEN
+                EgeZP15=EgeZP*(Bio(i,k,iPzoo15)/Bio(i,k,iPzoo))
+              ELSE
+                EgeZP15=0.0_r8
+              ENDIF
+# endif
+              Bio(i,k,iSzoo)=Bio(i,k,iSzoo)-EgeZS
+              Bio(i,k,iLzoo)=Bio(i,k,iLzoo)-EgeZL
+              Bio(i,k,iPzoo)=Bio(i,k,iPzoo)-EgeZP
+              Bio(i,k,iPON_)=Bio(i,k,iPON_)+EgeZS+EgeZL+EgeZP
+#if defined NEMUCSC
+              Bio(i,k,iopal)=Bio(i,k,iopal)+                            &
+     &                       (GraPL2ZS+GraPL2ZL+GraPL2ZP)*RSiN(ng)
+#else
+              Bio(i,k,iopal)=Bio(i,k,iopal)+(GraPL2ZL+GraPL2ZP)*RSiN(ng)
+#endif
+
+#if defined N15
+              Bio(i,k,iSzoo15)=Bio(i,k,iSzoo15)-EgeZS15
+              Bio(i,k,iLzoo15)=Bio(i,k,iLzoo15)-EgeZL15
+              Bio(i,k,iPzoo15)=Bio(i,k,iPzoo15)-EgeZP15
+              Bio(i,k,iPON15_)=Bio(i,k,iPON15_)+EgeZS15+EgeZL15+EgeZP15
+              
+              Bio(i,k,iSzoo14)=Bio(i,k,iSzoo)-Bio(i,k,iSzoo15)
+              Bio(i,k,iLzoo14)=Bio(i,k,iLzoo)-Bio(i,k,iLzoo15)
+              Bio(i,k,iPzoo14)=Bio(i,k,iPzoo)-Bio(i,k,iPzoo15)
+              Bio(i,k,iPON14_)=Bio(i,k,iPON_)-Bio(i,k,iPON15_)
+#endif
+!
+!  Zooplankton excretion to NH4.
+!
+#if defined NEMUCSC
+              ExcZS=(AlphaZS(ng)-BetaZS(ng))*                           &
+     &              (GraPS2ZS+GraPL2ZS)
+#else
+              ExcZS=(AlphaZS(ng)-BetaZS(ng))*                           &
+     &              GraPS2ZS
+#endif
+              ExcZL=(AlphaZL(ng)-BetaZL(ng))*                           &
+     &              (GraPS2ZL+GraPL2ZL+GraZS2ZL)
+              ExcZP=(AlphaZP(ng)-BetaZP(ng))*                           &
+     &              (GraPL2ZP+GraZS2ZP+GraZL2ZP)
+#if defined N15_LIM2
+              IF (Bio(i,k,iSzoo).LT.lim_min) THEN
+                ExcZS=0.0_r8
+              ENDIF
+              IF (Bio(i,k,iLzoo).LT.lim_min) THEN
+                ExcZL=0.0_r8
+              ENDIF
+              IF (Bio(i,k,iPzoo).LT.lim_min) THEN
+                ExcZP=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iSzoo)=Bio(i,k,iSzoo)-ExcZS
+              Bio(i,k,iLzoo)=Bio(i,k,iLzoo)-ExcZL
+              Bio(i,k,iPzoo)=Bio(i,k,iPzoo)-ExcZP
+              Bio(i,k,iNH4_)=Bio(i,k,iNH4_)+ExcZS+ExcZL+ExcZP
+#if defined N15
+              gamma_exc=1.0_r8-(eps_exc(ng)/1000.0_r8)
+              IF ((Bio(i,k,iSzoo).GT.0.0_r8) .AND.                    &
+     &            (Bio(i,k,iSzoo15).GT.0.0_r8) .AND.                  &
+     &            (Bio(i,k,iSzoo14).GT.0.0_r8)) THEN
+                ExcZS15=ExcZS*(gamma_exc*(Bio(i,k,iSzoo15)            &
+     &                  /Bio(i,k,iSzoo14)))/(1.0_r8+(gamma_exc*       &
+                        (Bio(i,k,iSzoo15)/Bio(i,k,iSzoo14))))              
+              ELSE
+                ExcZS15=0.0_r8
+              ENDIF
+              IF ((Bio(i,k,iLzoo).GT.0.0_r8) .AND.                    &
+     &            (Bio(i,k,iLzoo15).GT.0.0_r8) .AND.                  &
+     &            (Bio(i,k,iLzoo14).GT.0.0_r8)) THEN
+                ExcZL15=ExcZL*(gamma_exc*(Bio(i,k,iLzoo15)            &
+     &                  /Bio(i,k,iLzoo14)))/(1.0_r8+(gamma_exc*       &
+     &                  (Bio(i,k,iLzoo15)/Bio(i,k,iLzoo14))))
+              ELSE
+                ExcZL15=0.0_r8
+              ENDIF
+              IF ((Bio(i,k,iPzoo).GT.0.0_r8) .AND.                    &
+     &            (Bio(i,k,iPzoo15).GT.0.0_r8) .AND.                  &
+     &            (Bio(i,k,iPzoo14).GT.0.0_r8)) THEN
+                ExcZP15=ExcZP*(gamma_exc*(Bio(i,k,iPzoo15)            &
+     &                  /Bio(i,k,iPzoo14)))/(1.0_r8+(gamma_exc*       &
+     &                  (Bio(i,k,iPzoo15)/Bio(i,k,iPzoo14))))
+              ELSE
+                ExcZP15=0.0_r8
+              ENDIF
+              ExcZ15=ExcZS15+ExcZL15+ExcZP15
+              Bio(i,k,iSzoo15)=Bio(i,k,iSzoo15)-ExcZS15
+              Bio(i,k,iLzoo15)=Bio(i,k,iLzoo15)-ExcZL15
+              Bio(i,k,iPzoo15)=Bio(i,k,iPzoo15)-ExcZP15
+              Bio(i,k,iNH415_)=Bio(i,k,iNH415_)+ExcZ15
+              Bio(i,k,iSzoo14)=Bio(i,k,iSzoo)-Bio(i,k,iSzoo15)
+              Bio(i,k,iLzoo14)=Bio(i,k,iLzoo)-Bio(i,k,iLzoo15)
+              Bio(i,k,iPzoo14)=Bio(i,k,iPzoo)-Bio(i,k,iPzoo15)
+              Bio(i,k,iNH414_)=Bio(i,k,iNH4_)-Bio(i,k,iNH415_)
+#endif
+
+#if defined OXY
+!OX1.1.6
+              Bio(i,k,iOxyg)=Bio(i,k,iOxyg)-rOxNH4*(ExcZS+ExcZL+ExcZP)
+#endif
+#if defined CARB & ! defined KO05
+!C1.1.5
+              Bio(i,k,iTIC_)=Bio(i,k,iTIC_)+RedCN(ng)*                  &
+     &                                      (ExcZS+ExcZL+ExcZP)
+#endif
+            END DO
+          END DO
+
+! Check d15N values of PON
+#ifdef N15_CHECKS_BIOTOY
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+# ifdef MASKING
+            IF (rmask(i,j).EQ.1) THEN
+# endif
+             IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+               d15N=(((Bio(i,k,iPON15_)/Bio(i,k,iPON14_))/Rstd)-1)*1000               
+               d15N_change=d15N-d15N_old
+               d15N_old=d15N
+               print *, "after zoo ege/before zoo mort d15N PON=", d15N_change
+             ENDIF
+# ifdef MASKING
+            ENDIF
+# endif
+          END DO
+        END DO
+#endif
+
+
+!
+!-----------------------------------------------------------------------
+!  Zooplankton mortality to particulate organic nitrogen.
+!-----------------------------------------------------------------------
+!
+          fac1=dtdays*MorZS0(ng)
+          fac2=dtdays*MorZL0(ng)
+          fac3=dtdays*MorZP0(ng)
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+              cff1=fac1*Bio(i,k,iSzoo)*EXP(KMorZS(ng)*Bio(i,k,itemp))
+              cff2=fac2*Bio(i,k,iLzoo)*EXP(KMorZL(ng)*Bio(i,k,itemp))
+              cff3=fac3*Bio(i,k,iPzoo)*EXP(KMorZP(ng)*Bio(i,k,itemp))
+#if defined N15_LIM2
+              IF (Bio(i,k,iSzoo).LT.lim_min) THEN
+                cff1=0.0_r8
+              ENDIF
+              IF (Bio(i,k,iLzoo).LT.lim_min) THEN
+                cff2=0.0_r8
+              ENDIF
+              IF (Bio(i,k,iPzoo).LT.lim_min) THEN
+                cff3=0.0_r8
+              ENDIF
+#endif
+
+#ifdef N15_CHECKS_BIOTOY
+              IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                Szoo_old=Bio(i,k,iSzoo)
+              ENDIF
+#endif
+              Bio(i,k,iSzoo)=Bio(i,k,iSzoo)/(1.0_r8+cff1)
+#ifdef N15_CHECKS_BIOTOY
+              IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                Szoo_change=Bio(i,k,iSzoo)-Szoo_old
+                PON_change=Bio(i,k,iSzoo)*cff1
+                print *, "Szoo_change=",Szoo_change,"PON_change",PON_change
+              ENDIF
+#endif
+              Bio(i,k,iLzoo)=Bio(i,k,iLzoo)/(1.0_r8+cff2)
+              Bio(i,k,iPzoo)=Bio(i,k,iPzoo)/(1.0_r8+cff3)
+              Bio(i,k,iPON_)=Bio(i,k,iPON_)+                            &
+     &                       Bio(i,k,iSzoo)*cff1+                       &
+     &                       Bio(i,k,iLzoo)*cff2+                       &
+     &                       Bio(i,k,iPzoo)*cff3
+#if defined N15
+              cff_iso1=cff1
+              cff_iso2=cff2
+              cff_iso3=cff3
+#ifdef N15_CHECKS_BIOTOY
+              IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                Szoo_old=Bio(i,k,iSzoo15)
+              ENDIF
+#endif
+              Bio(i,k,iSzoo15)=Bio(i,k,iSzoo15)/(1.0_r8+cff_iso1)
+#ifdef N15_CHECKS_BIOTOY
+              IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                Szoo_change=Bio(i,k,iSzoo15)-Szoo_old
+                PON_change=Bio(i,k,iSzoo15)*cff_iso1
+                print *, "Szoo15_change=",Szoo_change,"PON15_change",PON_change
+              ENDIF
+#endif
+
+              Bio(i,k,iLzoo15)=Bio(i,k,iLzoo15)/(1.0_r8+cff_iso2)
+              Bio(i,k,iPzoo15)=Bio(i,k,iPzoo15)/(1.0_r8+cff_iso3)
+              Bio(i,k,iPON15_)=Bio(i,k,iPON15_)+                        &
+     &                         (cff_iso1*Bio(i,k,iSzoo15))+             &
+     &                         (cff_iso2*Bio(i,k,iLzoo15))+             &
+     &                         (cff_iso3*Bio(i,k,iPzoo15))              
+              Bio(i,k,iSzoo14)=Bio(i,k,iSzoo)-Bio(i,k,iSzoo15)
+              Bio(i,k,iLzoo14)=Bio(i,k,iLzoo)-Bio(i,k,iLzoo15)
+              Bio(i,k,iPzoo14)=Bio(i,k,iPzoo)-Bio(i,k,iPzoo15)
+              Bio(i,k,iPON14_)=Bio(i,k,iPON_)-Bio(i,k,iPON15_)
+#endif
+
+            END DO
+          END DO
+
+
+! Check d15N values of PON
+#ifdef N15_CHECKS_BIOTOY
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+# ifdef MASKING
+            IF (rmask(i,j).EQ.1) THEN
+# endif
+             IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+               d15N=(((Bio(i,k,iPON15_)/Bio(i,k,iPON14_))/Rstd)-1)*1000                
+               d15N_change=d15N-d15N_old
+               d15N_old=d15N
+               print *, "after zoo mort/before decomp d15N PON=", d15N_change
+             ENDIF
+# ifdef MASKING
+            ENDIF
+# endif
+          END DO
+        END DO
+#endif
+
+
+!
+!-----------------------------------------------------------------------
+!  Nutrient decomposition.
+!-----------------------------------------------------------------------
+!
+          fac1=dtdays*Nit0(ng)
+          fac2=dtdays*VP2N0(ng)
+          fac3=dtdays*VP2D0(ng)
+          fac4=dtdays*VD2N0(ng)
+          fac5=dtdays*VO2S0(ng)
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+!
+!  Nitrification: NH4 to NO3.
+!
+              cff1=fac1*EXP(KNit(ng)*Bio(i,k,itemp))
+#if defined N15_LIM2
+              IF (Bio(i,k,iNH4_).LT.lim_min) THEN
+                cff1=0.0_r8
+              ENDIF
+#endif
+#if defined CARB & ! defined KO06
+!C1.1.6a
+              cffC=cff1
+#endif
+              Bio(i,k,iNH4_)=Bio(i,k,iNH4_)/(1.0_r8+cff1)
+              Bio(i,k,iNO3_)=Bio(i,k,iNO3_)+                            &
+     &                       Bio(i,k,iNH4_)*cff1
+
+#if defined N15
+              cff_iso1=cff1 
+              Bio(i,k,iNH415_)=Bio(i,k,iNH415_)/(1.0_r8+cff_iso1)
+              Bio(i,k,iNO315_)=Bio(i,k,iNO315_)+                        &
+     &                         (cff_iso1*Bio(i,k,iNH415_))
+              Bio(i,k,iNH414_)=Bio(i,k,iNH4_)-Bio(i,k,iNH415_)
+              Bio(i,k,iNO314_)=Bio(i,k,iNO3_)-Bio(i,k,iNO315_)
+#endif
+
+#if defined OXY
+!OX1.1.7b
+              Bio(i,k,iOxyg)=Bio(i,k,iOxyg)-                            &
+     &                       cff1*2.0_r8*Bio(i,k,iNH4_)
+#endif
+#if defined CARB & ! defined KO06
+!C1.1.6b
+              cff=cffC*Bio(i,k,iNH4_)/MAX(MinVal,Bio(i,k,iTAlk))
+              Bio(i,k,iTAlk)=Bio(i,k,iTAlk)/(1.0_r8+cff)
+#endif
+
+!
+!  Decomposition: PON to NH4.
+!
+              cff2=fac2*EXP(KP2N(ng)*Bio(i,k,itemp))
+#if defined N15_LIM2
+              IF (Bio(i,k,iPON_).LT.lim_min) THEN
+                cff2=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iPON_)=Bio(i,k,iPON_)/(1.0_r8+cff2)
+              Bio(i,k,iNH4_)=Bio(i,k,iNH4_)+                            &
+     &                       Bio(i,k,iPON_)*cff2
+#if defined N15
+              cff_iso2=cff2 
+              Bio(i,k,iPON15_)=Bio(i,k,iPON15_)/(1.0_r8+cff_iso2)
+              Bio(i,k,iNH415_)=Bio(i,k,iNH415_)+                        &
+     &                         (cff_iso2*Bio(i,k,iPON15_))
+              Bio(i,k,iNH414_)=Bio(i,k,iNH4_)-Bio(i,k,iNH415_)
+              Bio(i,k,iPON14_)=Bio(i,k,iPON_)-Bio(i,k,iPON15_)
+#endif
+
+#if defined OXY
+
+# if defined DENIT
+              IF (Bio(i,k,iOxyg).LT.5.0_r8) THEN
+                DenitPON=MIN(Bio(i,k,iPON_)*cff2*rNO3NH4,Bio(i,k,iNO3_))
+                Bio(i,k,iNO3_)=Bio(i,k,iNO3_)-DenitPON
+#  if defined N15
+                gamma_denitPON=1.0_r8-(eps_denit(ng)/1000.0_r8)
+                IF ((Bio(i,k,iNO3_).GT.0.0_r8) .AND.                    &
+     &              (Bio(i,k,iNO315_).GT.0.0_r8) .AND.                  &
+     &              (Bio(i,k,iNO314_).GT.0.0_r8)) THEN
+                  DenitPON15=DenitPON*(gamma_denitPON*(Bio(i,k,iNO315_)   &
+     &                  /Bio(i,k,iNO314_)))/(1.0_r8+(gamma_denitPON*      &
+     &                  (Bio(i,k,iNO315_)/Bio(i,k,iNO314_))))
+                ELSE
+                  DenitPON15=0.0_r8
+                ENDIF
+                Bio(i,k,iNO315_)=Bio(i,k,iNO315_)-DenitPON15
+                Bio(i,k,iNO314_)=Bio(i,k,iNO3_)-Bio(i,k,iNO315_)
+#   endif
+              ELSE
+!OX1.1.8
+                Bio(i,k,iOxyg)=Bio(i,k,iOxyg)-Bio(i,k,iPON_)*cff2*rOxNH4
+
+              ENDIF
+# else
+              Bio(i,k,iOxyg)=Bio(i,k,iOxyg)-Bio(i,k,iPON_)*cff2*rOxNH4
+# endif
+#endif
+
+
+#if defined CARB & ! defined KO07
+!C1.1.7
+              Bio(i,k,iTIC_)=Bio(i,k,iTIC_)+                            &
+     &                       Bio(i,k,iPON_)*cff2*RedCN(ng)
+#endif
+
+!
+!  Decomposition: PON to DON.
+!
+              cff3=fac3*EXP(KP2D(ng)*Bio(i,k,itemp))
+#if defined N15_LIM2
+              IF (Bio(i,k,iPON_).LT.lim_min) THEN
+                cff3=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iPON_)=Bio(i,k,iPON_)/(1.0_r8+cff3)
+              Bio(i,k,iDON_)=Bio(i,k,iDON_)+                            &
+     &                       Bio(i,k,iPON_)*cff3
+#if defined N15
+              cff_iso3=cff3
+              Bio(i,k,iPON15_)=Bio(i,k,iPON15_)/(1.0_r8+cff_iso3)
+              Bio(i,k,iDON15_)=Bio(i,k,iDON15_)+                        &
+     &                         (cff_iso3*Bio(i,k,iPON15_))
+              Bio(i,k,iDON14_)=Bio(i,k,iDON_)-Bio(i,k,iDON15_)
+              Bio(i,k,iPON14_)=Bio(i,k,iPON_)-Bio(i,k,iPON15_)
+#endif
+
+!
+!  Decomposition: DON to NH4.
+!
+              cff4=fac4*EXP(KD2N(ng)*Bio(i,k,itemp))
+#if defined N15_LIM2
+              IF (Bio(i,k,iDON_).LT.lim_min) THEN
+                cff4=0.0_r8
+              ENDIF
+#endif
+              Bio(i,k,iDON_)=Bio(i,k,iDON_)/(1.0_r8+cff4)
+              Bio(i,k,iNH4_)=Bio(i,k,iNH4_)+                            &
+     &                       Bio(i,k,iDON_)*cff4
+#if defined N15
+              cff_iso4=cff4
+              Bio(i,k,iDON15_)=Bio(i,k,iDON15_)/(1.0_r8+cff_iso4)
+              Bio(i,k,iNH415_)=Bio(i,k,iNH415_)+                        &
+     &                         (cff_iso4*Bio(i,k,iDON15_))
+              Bio(i,k,iNH414_)=Bio(i,k,iNH4_)-Bio(i,k,iNH415_)
+              Bio(i,k,iDON14_)=Bio(i,k,iDON_)-Bio(i,k,iDON15_)
+#endif
+
+#if defined OXY
+# if defined DENIT
+              IF (Bio(i,k,iOxyg).LT.5.0_r8 .AND. Bio(i,k,iNO3_).GT.0.1_r8) THEN
+                DenitDON=MIN(Bio(i,k,iDON_)*cff4*rNO3NH4,Bio(i,k,iNO3_))
+                Bio(i,k,iNO3_)=Bio(i,k,iNO3_)-DenitDON
+#  if defined N15
+                gamma_denitDON=1.0_r8-(eps_denit(ng)/1000.0_r8)
+                IF ((Bio(i,k,iNO3_).GT.0.0_r8) .AND.                    &
+     &              (Bio(i,k,iNO315_).GT.0.0_r8) .AND.                  &
+     &              (Bio(i,k,iNO314_).GT.0.0_r8)) THEN
+                  DenitDON15=DenitDON*(gamma_denitDON*(Bio(i,k,iNO315_)   &
+     &                  /Bio(i,k,iNO314_)))/(1.0_r8+(gamma_denitDON*      &
+     &                  (Bio(i,k,iNO315_)/Bio(i,k,iNO314_))))
+                ELSE
+                  DenitDON15=0.0_r8
+                ENDIF
+                Bio(i,k,iNO315_)=Bio(i,k,iNO315_)-DenitDON15
+                Bio(i,k,iNO314_)=Bio(i,k,iNO3_)-Bio(i,k,iNO315_)
+#   endif
+              ELSE
+!OX1.1.9
+                Bio(i,k,iOxyg)=Bio(i,k,iOxyg)-Bio(i,k,iDON_)*cff4*rOxNH4
+              ENDIF
+# else
+!OX1.1.9
+              Bio(i,k,iOxyg)=Bio(i,k,iOxyg)-Bio(i,k,iDON_)*cff4*rOxNH4
+# endif
+#endif
+
+#if defined CARB & ! defined KO08
+!C1.1.8
+              Bio(i,k,iTIC_)=Bio(i,k,iTIC_)+                            &
+     &                       Bio(i,k,iDON_)*cff4*RedCN(ng)
+#endif
+
+!
+!  Decomposition: Opal to SiOH4.
+!
+              cff5=fac5*EXP(KO2S(ng)*Bio(i,k,itemp))
+              Bio(i,k,iopal)=Bio(i,k,iopal)/(1.0_r8+cff5)
+              Bio(i,k,iSiOH)=Bio(i,k,iSiOH)+                            &
+     &                       Bio(i,k,iopal)*cff5
+#if defined CARB & ! defined KO09
+!C1.1.9
+!
+!  Calcium carbonate dissolution
+!
+              cffC=dtdays*0.0057_r8
+              Bio(i,k,iTIC_)=Bio(i,k,iTIC_)+                            &
+     &                       Bio(i,k,iCalC)*cffC
+              Bio(i,k,iTAlk)=Bio(i,k,iTAlk)+                            &
+     &                       2.0_r8*Bio(i,k,iCalC)*cffC
+              Bio(i,k,iCalC)=Bio(i,k,iCalC)/(1.0_r8+cffC)
+#endif
+            END DO
+          END DO
+
+
+#if defined OXY
+!
+!-----------------------------------------------------------------------
+!  Surface O2 gas exchange.
+!-----------------------------------------------------------------------
+!
+!  Compute surface O2 gas exchange.
+!
+          cff1=rho0*550.0_r8
+          cff2=dtdays*0.31_r8*24.0_r8/100.0_r8
+          k=N(ng)
+          DO i=Istr,Iend
+!
+!  Compute O2 transfer velocity : u10squared (u10 in m/s)
+!
+# ifdef BULK_FLUXES
+            u10squ=Uwind(i,j)*Uwind(i,j)+Vwind(i,j)*Vwind(i,j)
+# else
+            u10squ=cff1*SQRT((0.5_r8*(sustr(i,j)+sustr(i+1,j)))**2+     &
+     &                       (0.5_r8*(svstr(i,j)+svstr(i,j+1)))**2)
+# endif
+# ifdef OCMIP_OXYGEN_SC
+!
+!  Alternative formulation for Schmidt number (Sc will be slightly
+!  smaller up to about 35 C): Compute the Schmidt number of oxygen
+!  in seawater using the formulation proposed by Keeling et al.
+!  (1998, Global Biogeochem. Cycles, 12, 141-163).  Input temperature
+!  in Celsius.
+!
+            SchmidtN_Ox=1638.0_r8-                                      &
+     &                  Bio(i,k,itemp)*(81.83_r8-                       &
+     &                                  Bio(i,k,itemp)*                 &
+     &                                  (1.483_r8-                      &
+     &                                   Bio(i,k,itemp)*0.008004_r8))
+# else
+!
+!  Calculate the Schmidt number for O2 in sea water (Wanninkhof, 1992).
+!
+            SchmidtN_Ox=1953.4_r8-                                      &
+     &                  Bio(i,k,itemp)*(128.0_r8-                       &
+     &                                  Bio(i,k,itemp)*                 &
+     &                                  (3.9918_r8-                     &
+     &                                   Bio(i,k,itemp)*0.050091_r8))
+# endif
+
+            cff3=cff2*u10squ*SQRT(660.0_r8/SchmidtN_Ox)
+!
+!  Calculate O2 saturation concentration using Garcia and Gordon
+!  L&O (1992) formula, (EXP(AA) is in ml/l).
+!
+            TS=LOG((298.15_r8-Bio(i,k,itemp))/                          &
+     &             (273.15_r8+Bio(i,k,itemp)))
+            AA=OA0+TS*(OA1+TS*(OA2+TS*(OA3+TS*(OA4+TS*OA5))))+          &
+     &             Bio(i,k,isalt)*(OB0+TS*(OB1+TS*(OB2+TS*OB3)))+       &
+     &             OC0*Bio(i,k,isalt)*Bio(i,k,isalt)
+!
+!  Convert from ml/l to mmol/m3.
+!
+            O2satu=l2mol*EXP(AA)
+!
+!  Add in O2 gas exchange.
+!
+            O2_Flux=cff3*(O2satu-Bio(i,k,iOxyg))
+            Bio(i,k,iOxyg)=Bio(i,k,iOxyg)+                              &
+     &                     O2_Flux*Hz_inv(i,k)
+          END DO
+#endif
+#if defined CARB
+!
+!-----------------------------------------------------------------------
+!  Surface CO2 gas exchange.
+!-----------------------------------------------------------------------
+!
+!  Compute equilibrium partial pressure inorganic carbon (ppmv) at the
+!  surface.
+!
+!
+          cff1=rho0*550.0_r8
+          cff2=dtdays*0.31_r8*24.0_r8/100.0_r8
+!
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+!
+!  Compute pCO2 and pH.
+!
+              tempik=Bio(i,k,itemp)
+              saltik=Bio(i,k,isalt)
+              ticik=Bio(i,k,iTIC_)
+              talkik=Bio(i,k,iTAlk)
+#if defined TANGENT || defined ADJOINT
+!
+!  Save the intermediate Bio variables
+!
+              IF (PRESENT(BS)) THEN
+                BS(i,k,iTIC_,5)=Bio(i,k,iTIC_)
+                BS(i,k,iTAlk,5)=Bio(i,k,iTAlk)
+              END IF
+#endif
+
+#  ifdef MASKING
+              maskik=rmask(i,j)
+#  endif
+              CALL pCO2_water (                                         &
+#  ifdef MASKING
+     &                         maskik,                                  &
+#  endif
+     &                         tempik, saltik, ticik, talkik,           &
+     &                         0.0_r8, 0.0_r8, phik, pco2ik)
+              pCO2(i,j,k)=pco2ik
+              pH(i,j,k)=phik
+!
+!  Compute surface CO2 gas exchange.
+!
+              IF (k.eq.N(ng)) THEN
+!
+!  Compute CO2 transfer velocity : u10squared (u10 in m/s)
+!
+# ifdef BULK_FLUXES
+                u10squ=Uwind(i,j)**2+Vwind(i,j)**2
+# else
+                u10squ=cff1*SQRT((0.5_r8*(sustr(i,j)+sustr(i+1,j)))**2+ &
+     &                           (0.5_r8*(svstr(i,j)+svstr(i,j+1)))**2)
+# endif
+                SchmidtN=Acoef-                                         &
+     &                   Bio(i,k,itemp)*(Bcoef-                         &
+     &                                   Bio(i,k,itemp)*(Ccoef-         &
+     &                                   Bio(i,k,itemp)*Dcoef))
+                cff3=cff2*u10squ*SQRT(660.0_r8/SchmidtN)
+!
+!  Calculate CO2 solubility [mol/(kg.atm)] using Weiss (1974) formula.
+!
+                TempK=0.01_r8*(Bio(i,k,itemp)+273.15_r8)
+                CO2_sol=EXP(A1+                                         &
+     &                      A2/TempK+                                   &
+     &                      A3*LOG(TempK)+                              &
+     &                      Bio(i,k,isalt)*(B1+TempK*(B2+B3*TempK)))
+!
+!  Add in CO2 gas exchange.
+!
+# if defined NEMURO_CO2_SECULAR
+                pCO2air_secular=pCO2air(ng)+                            &
+     &                          1.5_r8*((tdays(ng)-dstart)/365.25_r8)
+                CO2_Flux=cff3*CO2_sol*(pCO2air_secular-pco2ik)
+# elif defined NEMURO_CO2_TREND
+                pCO2air_secular=pCO2air(ng)+pCO2trend(ng)*              &
+     &                          ((tdays(ng)-dstart)/365.25_r8)
+                CO2_Flux=cff3*CO2_sol*(pCO2air_secular-pco2ik)
+# elif defined NEMURO_CO2_RCP85
+                pCO2air_mo=(/ 0.05_r8,0.67_r8,1.45_r8,2.59_r8,3.03_r8,  &
+     &                        2.32_r8,0.72_r8,-1.45_r8,-3.13_r8,        &
+     &                        -3.24_r8,-2.07_r8, -0.90_r8 /)
+                tmod=MOD(tdays(ng)/(365.25_r8/12.0_r8),12.0_r8)+0.5_r8
+                fac2=tmod-REAL(INT(tmod),r8)
+                fac1=1.0_r8-fac2
+                imo1=INT(tmod)
+                IF (imo1.lt.1) imo1=12
+                imo2=imo1+1
+                IF (imo2.gt.12) imo2=1
+                pCO2air_cyc=fac1*pCO2air_mo(imo1)+fac2*pCO2air_mo(imo2)
+                pCO2air_trnd=1.8661_r8*((tdays(ng)-dstart)/             &
+     &                                 365.25_r8)**1.220_r8
+#  ifdef NEMURO_CO2_ENSEMBLE
+                pCO2air_trnd=pCO2fac(ng)*pCO2air_trnd
+#  endif
+                pCO2air_tot = pCO2air(ng)+pCO2air_cyc+pCO2air_trnd
+                CO2_Flux=cff3*CO2_sol*(pCO2air_tot-pCO2ik)
+                if ((i.eq.10).and.(j.eq.10).and.                        &
+     &              (tdays(ng).eq.REAL(INT(tdays(ng),r8))))             &
+     &            print*,'CO2air',REAL(tdays(ng),r4),                   &
+     &                   REAL(pCO2air_cyc,r4),REAL(pCO2air_trnd,r4)
+# else
+                CO2_Flux=cff3*CO2_sol*(pCO2air(ng)-pco2ik)
+# endif
+                Bio(i,k,iTIC_)=Bio(i,k,iTIC_)+CO2_Flux*Hz_inv(i,k)
+                CO2flx(i,j)=CO2_Flux
+              END IF
+!
+            END DO
+          END DO
+
+#endif
+
+#ifdef N15_CHECKS_BIOTOY
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+# ifdef MASKING
+            IF (rmask(i,j).EQ.1) THEN
+# endif
+             IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+               d15N=(((Bio(i,k,iPON15_)/Bio(i,k,iPON14_))/Rstd)-1)*1000               
+               d15N_change=d15N-d15N_old
+               d15N_old=d15N
+               print *, "after decomp/before sinking d15N PON=", d15N_change
+             ENDIF
+# ifdef MASKING
+            ENDIF
+# endif
+          END DO
+        END DO
+#endif
+
+
+
+!
+!-----------------------------------------------------------------------
+!  Vertical sinking terms: PON and Opal.
+!-----------------------------------------------------------------------
+!
+!  Reconstruct vertical profile of selected biological constituents
+!  "Bio(:,:,isink)" in terms of a set of parabolic segments within each
+!  grid box. Then, compute semi-Lagrangian flux due to sinking.
+!
+#if defined CHECK_SINK_MBAL
+! we are going to check whether the total vertically integrated
+! sum of 15PON, 14PON and total PON are the same before/after sinking,
+! and whether 15PON+14PON adds up to total PON (in each grid cell
+! and vertically integrated
+          IF (j.EQ.3) THEN
+            sum_PON_vert=0
+            sum_PON14_vert=0
+            sum_PON15_vert=0
+            i=3
+            print *, "Before sinking:"
+            DO k=1,N(ng)
+                print *, "k=", k
+                print *, "PON-(PON15+PON14) in cell=",Bio(i,k,iPON_)-(Bio(i,k,iPON15_)+Bio(i,k,iPON14_))
+                sum_PON_vert=sum_PON_vert+Hz(i,j,k)*Bio(i,k,iPON_)
+                sum_PON15_vert=sum_PON15_vert+Hz(i,j,k)*Bio(i,k,iPON15_)
+                sum_PON14_vert=sum_PON14_vert+Hz(i,j,k)*Bio(i,k,iPON14_)
+            END DO
+            print *, "sum_PON_vert=",sum_PON_vert
+            print *, "sum_PON15_vert=",sum_PON15_vert
+            print *, "sum_PON14_vert=",sum_PON14_vert
+            print *, "sum_PON14_vert+sum_PON15_vert=", sum_PON15_vert+sum_PON14_vert
+          ENDIF
+
+#endif
+
+#if defined N15
+# if defined SINK_RATIO
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+              IF ((Bio(i,k,iPON14_).GT.0.0_r8) .AND.                        &
+      &           (Bio(i,k,iPON15_).GT.0.0_r8)) THEN
+                Bio(i,k,iPONratio)=(Bio(i,k,iPON15_)/Bio(i,k,iPON14_))
+              ELSE
+                Bio(i,k,iPONratio)=1.006_r8
+              ENDIF 
+!              print *, "before sinking PON ratio=", Bio(i,k,iPONratio)
+!              d15N=(((Bio(i,k,iPON15_)/Bio(i,k,iPON14_))/Rstd)-1)*1000
+!              print *, "before sinking d15N PON=", d15N
+!              d15N=(((Bio(i,k,iDON15_)/Bio(i,k,iDON14_))/Rstd)-1)*1000
+!              print *, "before sinking d15N DON=", d15N
+!              d15N=(((Bio(i,k,iNH415_)/Bio(i,k,iNH414_))/Rstd)-1)*1000
+!              print *, "before sinking d15N NH4=", d15N
+            END DO
+          END DO 
+# endif 
+#endif
+          SINK_LOOP: DO isink=1,Nsink
+            ibio=idsink(isink)
+!
+!  Copy concentration of biological particulates into scratch array
+!  "qc" (q-central, restrict it to be positive) which is hereafter
+!  interpreted as a set of grid-box averaged values for biogeochemical
+!  constituent concentration.
+!
+            DO k=1,N(ng)
+              DO i=Istr,Iend
+                qc(i,k)=Bio(i,k,ibio)
+              END DO
+            END DO
+!
+            DO k=N(ng)-1,1,-1
+              DO i=Istr,Iend
+                FC(i,k)=(qc(i,k+1)-qc(i,k))*Hz_inv2(i,k)
+              END DO
+            END DO
+            DO k=2,N(ng)-1
+              DO i=Istr,Iend
+                dltR=Hz(i,j,k)*FC(i,k)
+                dltL=Hz(i,j,k)*FC(i,k-1)
+                cff=Hz(i,j,k-1)+2.0_r8*Hz(i,j,k)+Hz(i,j,k+1)
+                cffR=cff*FC(i,k)
+                cffL=cff*FC(i,k-1)
+!
+!  Apply PPM monotonicity constraint to prevent oscillations within the
+!  grid box.
+!
+                IF ((dltR*dltL).le.0.0_r8) THEN
+                  dltR=0.0_r8
+                  dltL=0.0_r8
+                ELSE IF (ABS(dltR).gt.ABS(cffL)) THEN
+                  dltR=cffL
+                ELSE IF (ABS(dltL).gt.ABS(cffR)) THEN
+                  dltL=cffR
+                END IF
+!
+!  Compute right and left side values (bR,bL) of parabolic segments
+!  within grid box Hz(k); (WR,WL) are measures of quadratic variations.
+!
+!  NOTE: Although each parabolic segment is monotonic within its grid
+!        box, monotonicity of the whole profile is not guaranteed,
+!        because bL(k+1)-bR(k) may still have different sign than
+!        qc(i,k+1)-qc(i,k).  This possibility is excluded,
+!        after bL and bR are reconciled using WENO procedure.
+!
+                cff=(dltR-dltL)*Hz_inv3(i,k)
+                dltR=dltR-cff*Hz(i,j,k+1)
+                dltL=dltL+cff*Hz(i,j,k-1)
+                bR(i,k)=qc(i,k)+dltR
+                bL(i,k)=qc(i,k)-dltL
+                WR(i,k)=(2.0_r8*dltR-dltL)**2
+                WL(i,k)=(dltR-2.0_r8*dltL)**2
+              END DO
+            END DO
+            cff=1.0E-14_r8
+            DO k=2,N(ng)-2
+              DO i=Istr,Iend
+                dltL=MAX(cff,WL(i,k  ))
+                dltR=MAX(cff,WR(i,k+1))
+                bR(i,k)=(dltR*bR(i,k)+dltL*bL(i,k+1))/(dltR+dltL)
+                bL(i,k+1)=bR(i,k)
+              END DO
+            END DO
+            DO i=Istr,Iend
+              FC(i,N(ng))=0.0_r8            ! NO-flux boundary condition
+#if defined LINEAR_CONTINUATION
+              bL(i,N(ng))=bR(i,N(ng)-1)
+              bR(i,N(ng))=2.0_r8*qc(i,N(ng))-bL(i,N(ng))
+#elif defined NEUMANN
+              bL(i,N(ng))=bR(i,N(ng)-1)
+              bR(i,N(ng))=1.5_r8*qc(i,N(ng))-0.5_r8*bL(i,N(ng))
+#else
+              bR(i,N(ng))=qc(i,N(ng))       ! default strictly monotonic
+              bL(i,N(ng))=qc(i,N(ng))       ! conditions
+              bR(i,N(ng)-1)=qc(i,N(ng))
+#endif
+#if defined LINEAR_CONTINUATION
+              bR(i,1)=bL(i,2)
+              bL(i,1)=2.0_r8*qc(i,1)-bR(i,1)
+#elif defined NEUMANN
+              bR(i,1)=bL(i,2)
+              bL(i,1)=1.5_r8*qc(i,1)-0.5_r8*bR(i,1)
+#else
+              bL(i,2)=qc(i,1)               ! bottom grid boxes are
+              bR(i,1)=qc(i,1)               ! re-assumed to be
+              bL(i,1)=qc(i,1)               ! piecewise constant.
+#endif
+            END DO
+!
+!  Apply monotonicity constraint again, since the reconciled interfacial
+!  values may cause a non-monotonic behavior of the parabolic segments
+!  inside the grid box.
+!
+            DO k=1,N(ng)
+              DO i=Istr,Iend
+                dltR=bR(i,k)-qc(i,k)
+                dltL=qc(i,k)-bL(i,k)
+                cffR=2.0_r8*dltR
+                cffL=2.0_r8*dltL
+                IF ((dltR*dltL).lt.0.0_r8) THEN
+                  dltR=0.0_r8
+                  dltL=0.0_r8
+                ELSE IF (ABS(dltR).gt.ABS(cffL)) THEN
+                  dltR=cffL
+                ELSE IF (ABS(dltL).gt.ABS(cffR)) THEN
+                  dltL=cffR
+                END IF
+                bR(i,k)=qc(i,k)+dltR
+                bL(i,k)=qc(i,k)-dltL
+              END DO
+            END DO
+!
+!  After this moment reconstruction is considered complete. The next
+!  stage is to compute vertical advective fluxes, FC. It is expected
+!  that sinking may occurs relatively fast, the algorithm is designed
+!  to be free of CFL criterion, which is achieved by allowing
+!  integration bounds for semi-Lagrangian advective flux to use as
+!  many grid boxes in upstream direction as necessary.
+!
+!  In the two code segments below, WL is the z-coordinate of the
+!  departure point for grid box interface z_w with the same indices;
+!  FC is the finite volume flux; ksource(:,k) is index of vertical
+!  grid box which contains the departure point (restricted by N(ng)).
+!  During the search: also add in content of whole grid boxes
+!  participating in FC.
+!
+            cff=dtdays*ABS(Wbio(isink))
+            DO k=1,N(ng)
+              DO i=Istr,Iend
+                FC(i,k-1)=0.0_r8
+                WL(i,k)=z_w(i,j,k-1)+cff
+                WR(i,k)=Hz(i,j,k)*qc(i,k)
+                ksource(i,k)=k
+              END DO
+            END DO
+            DO k=1,N(ng)
+              DO ks=k,N(ng)-1
+                DO i=Istr,Iend
+                  IF (WL(i,k).gt.z_w(i,j,ks)) THEN
+                    ksource(i,k)=ks+1
+                    FC(i,k-1)=FC(i,k-1)+WR(i,ks)
+                  END IF
+                END DO
+              END DO
+            END DO
+!
+!  Finalize computation of flux: add fractional part.
+!
+            DO k=1,N(ng)
+              DO i=Istr,Iend
+                ks=ksource(i,k)
+                cu=MIN(1.0_r8,(WL(i,k)-z_w(i,j,ks-1))*Hz_inv(i,ks))
+                FC(i,k-1)=FC(i,k-1)+                                    &
+     &                    Hz(i,j,ks)*cu*                                &
+     &                    (bL(i,ks)+                                    &
+     &                     cu*(0.5_r8*(bR(i,ks)-bL(i,ks))-              &
+     &                         (1.5_r8-cu)*                             &
+     &                         (bR(i,ks)+bL(i,ks)-                      &
+     &                          2.0_r8*qc(i,ks))))
+              END DO
+            END DO
+#if defined N15
+# if defined SINK_RATIO
+            IF (ibio.EQ.iPONratio) THEN
+              DO i=Istr,Iend
+                FC(i,N(ng))=FC(i,N(ng)-1)
+              END DO
+            ENDIF
+# endif
+#endif
+            DO k=1,N(ng)
+              DO i=Istr,Iend
+                Bio(i,k,ibio)=qc(i,k)+(FC(i,k)-FC(i,k-1))*Hz_inv(i,k)
+              END DO
+            END DO
+
+!           DO k=1,N(ng)
+!             DO i=Istr,Iend
+!               print *, "after sinking PON ratio=", Bio(i,k,iPONratio)
+!             END DO
+!           END DO
+
+#ifdef BIO_SEDIMENT
+!
+!  Particulate fluxes reaching the seafloor are remineralized and returned
+!  to the dissolved nutrient pool. Without this conversion, particulate
+!  material falls out of the system. This is a temporary fix to restore
+!  total nutrient conservation. This may require a time delay
+!  remineralization in the future.
+!
+!  HGA: The original Nemuro model has a restoring upwelling rate (UPW).
+!       The code below is an interpretation in terms of the semi-
+!       Lagrangian algorithm. What is the correct nutrient path from
+!       the benthos to the water column?  NH4 to NO3?
+!
+            IF (ibio.eq.iPON_) THEN
+              DO i=Istr,Iend
+                cff1=FC(i,0)*Hz_inv(i,1)
+# if defined NEMUCSC
+                Bio(i,1,iNH4_)=Bio(i,1,iNH4_)+cff1
+# else
+                Bio(i,1,iNO3_)=Bio(i,1,iNO3_)+cff1
+# endif
+              END DO
+            ELSE IF (ibio.eq.iopal) THEN
+              DO i=Istr,Iend
+                cff1=FC(i,0)*Hz_inv(i,1)
+                Bio(i,1,iSiOH)=Bio(i,1,iSiOH)+cff1
+              END DO
+            END IF
+#endif
+
+          END DO SINK_LOOP
+
+#ifdef N15
+# ifdef SINK_RATIO
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+              Bio(i,k,iPON14_)=Bio(i,k,iPON_)/(1.0_r8+Bio(i,k,iPONratio))
+              Bio(i,k,iPON15_)=Bio(i,k,iPON_)-Bio(i,k,iPON14_)
+            END DO
+          END DO
+# endif
+#endif
+
+#ifdef N15_CHECKS_BIOTOY
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+# ifdef MASKING
+              IF (rmask(i,j).EQ.1) THEN
+# endif
+               IF ((k.EQ.29) .AND. (i.EQ.3) .AND. (j.EQ.3)) THEN
+                 d15N=(((Bio(i,k,iPON15_)/Bio(i,k,iPON14_))/Rstd)-1)*1000
+                 d15N_change=d15N-d15N_old
+                 d15N_old=d15N
+                 print *, "after sinking d15N PON=", d15N_change
+               ENDIF
+# ifdef MASKING
+              ENDIF
+# endif
+            END DO
+          END DO
+#endif
+
+#if defined CHECK_SINK_MBAL
+! we are going to check whether the total vertically integrated
+! sum of 15PON, 14PON and total PON are the same before/after sinking,
+! and whether 15PON+14PON adds up to total PON (in each grid cell
+! and vertically integrated
+          IF (j.EQ.3) THEN
+            sum_PON_vert=0
+            sum_PON14_vert=0
+            sum_PON15_vert=0
+            i=3
+            print *, "After sinking:"
+            DO k=1,N(ng)
+                print *, "k=", k
+                print *, "PON-(PON15+PON14) in cell=",Bio(i,k,iPON_)-(Bio(i,k,iPON15_)+Bio(i,k,iPON14_))
+                sum_PON_vert=sum_PON_vert+Hz(i,j,k)*Bio(i,k,iPON_)
+                sum_PON15_vert=sum_PON15_vert+Hz(i,j,k)*Bio(i,k,iPON15_)
+                sum_PON14_vert=sum_PON14_vert+Hz(i,j,k)*Bio(i,k,iPON14_)
+            END DO
+            print *, "sum_PON_vert=",sum_PON_vert
+            print *, "sum_PON15_vert=",sum_PON15_vert
+            print *, "sum_PON14_vert=",sum_PON14_vert
+            print *, "sum_PON14_vert+sum_PON15_vert=", sum_PON15_vert+sum_PON14_vert
+          ENDIF
+#endif
+
+
+        END DO ITER_LOOP
+!
+!-----------------------------------------------------------------------
+!  Update global tracer variables: Add increment due to BGC processes
+!  to tracer array in time index "nnew". Index "nnew" is solution after
+!  advection and mixing and has transport units (m Tunits) hence the
+!  increment is multiplied by Hz.  Notice that we need to subtract
+!  original values "Bio_old" at the top of the routine to just account
+!  for the concentrations affected by BGC processes. This also takes
+!  into account any constraints (non-negative concentrations, carbon
+!  concentration range) specified before entering BGC kernel. If "Bio"
+!  were unchanged by BGC processes, the increment would be exactly
+!  zero. Notice that final tracer values, t(:,:,:,nnew,:) are not
+!  bounded >=0 so that we can preserve total inventory of nutrients
+!  when advection causes tracer concentration to go negative.
+!-----------------------------------------------------------------------
+!
+#ifdef CARB
+!! TODO: how important is this?
+!        DO k=1,N(ng)
+!          DO i=Istr,Iend
+!            Bio(i,k,iTIC_)=MIN(Bio(i,k,iTIC_),3000.0_r8)
+!            Bio(i,k,iTIC_)=MAX(Bio(i,k,iTIC_),400.0_r8)
+!          END DO
+!        END DO
+#endif
+
+        DO itrc=1,NBT
+          ibio=idbio(itrc)
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+#ifdef MASKING
+              IF (rmask(i,j).EQ.1) THEN
+#endif
+                cff=Bio(i,k,ibio)-Bio_old(i,k,ibio)
+!#ifdef NEG_ALERT
+!                IF ((i.EQ.88) .AND. (j.EQ.124) .AND. (k.EQ.14) .AND. (ibio.EQ.4)) THEN
+!                  print *, "Diatom:"
+!                  print *, "Bio(i,k,ibio), Bio_old(i,k,ibio)", Bio(i,k,ibio), Bio_old(i,k,ibio)
+!                  print *, "cff (Bio(i,k,ibio)-Bio_old(i,k,ibio)), Hz(i,j,k)",cff, Hz(i,j,k)
+!                  print *, "t(i,j,k,nnew,ibio) before", t(i,j,k,nnew,ibio)
+!                  print *, "new t(i,j,k,nnew,ibio)",t(i,j,k,nnew,ibio)+cff*Hz(i,j,k) 
+!                ENDIF
+!                IF ((i.EQ.88) .AND. (j.EQ.124) .AND. (k.EQ.14) .AND. (ibio.EQ.15)) THEN
+!                  print *, "Diatom15:"
+!                  print *, "Bio(i,k,ibio), Bio_old(i,k,ibio)", Bio(i,k,ibio), Bio_old(i,k,ibio)
+!                  print *, "cff (Bio(i,k,ibio)-Bio_old(i,k,ibio)), Hz(i,j,k)",cff, Hz(i,j,k)
+!                  print *, "t(i,j,k,nnew,ibio) before", t(i,j,k,nnew,ibio)
+!                  print *, "new t(i,j,k,nnew,ibio)",t(i,j,k,nnew,ibio)+cff*Hz(i,j,k)
+!                ENDIF
+!                IF ((i.EQ.88) .AND. (j.EQ.124) .AND. (k.EQ.14) .AND. (ibio.EQ.24)) THEN
+!                  print *, "Diatom14:"
+!                  print *, "Bio(i,k,ibio), Bio_old(i,k,ibio)", Bio(i,k,ibio), Bio_old(i,k,ibio)
+!                  print *, "cff (Bio(i,k,ibio)-Bio_old(i,k,ibio)), Hz(i,j,k)",cff, Hz(i,j,k)
+!                  print *, "t(i,j,k,nnew,ibio) before", t(i,j,k,nnew,ibio)
+!                  print *, "new t(i,j,k,nnew,ibio)",t(i,j,k,nnew,ibio)+cff*Hz(i,j,k)
+!                ENDIF
+!#endif
+
+                t(i,j,k,nnew,ibio)=t(i,j,k,nnew,ibio)+cff*Hz(i,j,k)
+
+#ifdef NEG_ALERT
+                IF ((ibio.NE.12) .AND. (ibio.NE.13) .AND. (ibio.NE.33)) THEN
+                 IF ((Bio(i,k,ibio).LE.limval) .OR. (Bio(i,k,ibio).NE.Bio(i,k,ibio))) THEN
+                   print *, "after nemuro in Bio i,j,k,ibio (eq to tracer #),val=", i,j,k,ibio,Bio(i,k,ibio)
+                 ENDIF
+                 IF ((Bio(i,k,ibio).LE.0.0_r8) .OR. (Bio(i,k,ibio).NE.Bio(i,k,ibio))) THEN
+                   print *, "negative alert! or NaN"
+                 ENDIF
+                 IF ((t(i,j,k,nnew,ibio).LE.limval) .OR. (t(i,j,k,nnew,ibio).NE.t(i,j,k,nnew,ibio))) THEN
+                   print *, "after nemuro in nnew i,j,k,ibio(eq to tracer #),val=", i,j,k,ibio,t(i,j,k,nnew,ibio)
+                 ENDIF
+                 IF ((t(i,j,k,nnew,ibio).LE.0.0_r8) .OR. (t(i,j,k,nnew,ibio).NE.t(i,j,k,nnew,ibio))) THEN
+                   print *, "negative alert! or NaN"
+                 ENDIF
+                ENDIF
+#endif
+
+#ifdef MASKING
+              END IF
+#endif
+            END DO
+          END DO
+        END DO
+
+! Check d15N values of PON, DON, NH4 after nemuro routine
+!        DO k=1,N(ng)
+!          DO i=Istr,Iend
+
+!# ifdef MASKING
+!            IF (rmask(i,j).EQ.1) THEN
+!# endif
+!               IF ((k.EQ.30) .AND. (i.EQ.2) .AND. (j.EQ.2)) THEN
+!               d15N=(((t(i,j,k,nnew,iPON15_)/                       &
+!     &              t(i,j,k,nnew,iPON14_))/Rstd)-1)*1000
+!               print *, "after nemuro before N15lim d15N PON=", d15N
+
+!               d15N=(((t(i,j,k,nnew,iDON15_)/                       &
+!     &              t(i,j,k,nnew,iDON14_))/Rstd)-1)*1000
+!               print *, "after nemuro before N15 lim d15N DON=", d15N
+
+!               d15N=(((t(i,j,k,nnew,iNH415_)/                       &
+!     &              t(i,j,k,nnew,iNH414_))/Rstd)-1)*1000
+!               print *, "after nemuro before N15 lim d15N NH4=", d15N
+!# ifdef MASKING
+!            ENDIF
+!# endif
+!          END DO
+!        END DO
+
+
+      END DO J_LOOP
+!
+      RETURN
+      END SUBROUTINE nemuro_tile
+
+      END MODULE biology_mod

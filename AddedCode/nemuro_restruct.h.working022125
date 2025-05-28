@@ -1,0 +1,1254 @@
+      MODULE biology_mod
+!
+!git $Id$
+!================================================== Hernan G. Arango ===
+!  Copyright (c) 2002-2025 The ROMS Group                              !
+!    Licensed under a MIT/X style license                              !
+!    See License_ROMS.md                                               !
+!=======================================================================
+!                                                                      !
+!  Nemuro Lower Trophic Level Ecosystem Model.                         !
+!                                                                      !
+!  This routine computes the biological sources and sinks and adds     !
+!  then the global biological fields. Currently, the ecosystem has     !
+!  the following functional compartments:                              !
+!                                                                      !
+!    iSphy     small phytoplankton biomass, nanophytoplankton          !
+!    iLphy     large phytoplankton biomass, diatoms                    !
+!    iSzoo     small zooplankton biomass, microzooplankton (ciliates)  !
+!    iLzoo     large zooplankton biomass, mesozooplankton (copepods)   !
+!    iPzoo     predator zooplankton biomass (euphausiids, etc)         !
+!    iNO3_     nitrate concentration, NO3                              !
+!    iNH4_     ammonium concentration, NH4                             !
+!    iPON_     particulate organic nitrogen                            !
+!    iDON_     dissolved organic nitrogen                              !
+!    iSiOH     silicate concentration, Si(OH)4 (silicic acid)          !
+!    iopal     particulate organic silica                              !
+!                                                                      !
+!  Reference:                                                          !
+!                                                                      !
+!    Kishi, M. J., et  all, 2007: Nemuro - a lower trophic level       !
+!      model for the North Pacific marine ecosystem,  Ecological       !
+!      Modelling, 202, 12-25.                                          !
+!    Fiechter, J., A.M. Moore, 2009: Interannual spring bloom          !
+!      variability and Ekman pumping in the coastal Gulf of Alaska,    !
+!      J. Geophys. Res., 114, C06004.                                  !
+!    Fiechter, J., A.M. Moore, C.A. Edwards, K.W. Bruland,             !
+!      E. Di Lorenzo, C.V.W. Lewis, T.M. Powell, E. Curchitser         !
+!      and K. Hedstrom, 2009: Modeling iron limitation of primary      !
+!      production in the coastal Gulf of Alaska, Deep Sea Res. II      !
+!                                                                      !
+!=======================================================================
+!
+      implicit none
+!
+      PRIVATE
+      PUBLIC  :: biology
+!
+      CONTAINS
+!
+!***********************************************************************
+      SUBROUTINE biology (ng,tile)
+!***********************************************************************
+!
+      USE mod_param
+      USE mod_forces
+      USE mod_grid
+      USE mod_ncparam
+      USE mod_ocean
+      USE mod_stepping
+#if defined DIAGNOSTICS_BIO
+      USE mod_diags
+#endif
+!
+!  Imported variable declarations.
+!
+      integer, intent(in) :: ng, tile
+!
+!  Local variable declarations.
+!
+      character (len=*), parameter :: MyFile =                          &
+     &  __FILE__
+!
+#include "tile.h"
+!
+!  Set header file name.
+!
+#ifdef DISTRIBUTE
+      IF (Lbiofile(iNLM)) THEN
+#else
+      IF (Lbiofile(iNLM).and.(tile.eq.0)) THEN
+#endif
+        Lbiofile(iNLM)=.FALSE.
+        BIONAME(iNLM)=MyFile
+      END IF
+!
+#ifdef PROFILE
+      CALL wclock_on (ng, iNLM, 15, __LINE__, MyFile)
+#endif
+      CALL nemuro_restruct_tile (ng, tile,                              &
+     &                           LBi, UBi, LBj, UBj, N(ng), NT(ng),     &
+     &                           IminS, ImaxS, JminS, JmaxS,            &
+     &                           nstp(ng), nnew(ng),                    &
+#ifdef MASKING
+     &                           GRID(ng) % rmask,                      &
+#endif
+     &                           GRID(ng) % Hz,                         &
+     &                           GRID(ng) % z_r,                        &
+     &                           GRID(ng) % z_w,                        &
+     &                           FORCES(ng) % srflx,                    &
+#ifdef OAE
+     &                           FORCES(ng) % OAEflux,                  &
+#endif
+#ifdef DOR
+     &                           FORCES(ng) % DORflux,                  &
+#endif
+#ifdef DAILY_SHORTWAVE
+     &                           FORCES(ng) % srflx_avg,                &
+#endif
+#if defined ATTSW_LIN
+     &                           GRID(ng) % h  ,                        &
+#endif
+#if defined CARB || defined OXY
+# ifdef BULK_FLUXES
+     &                           FORCES(ng) % Uwind,                    &
+     &                           FORCES(ng) % Vwind,                    &
+# else
+     &                           FORCES(ng) % sustr,                    &
+     &                           FORCES(ng) % svstr,                    &
+# endif
+#endif
+#ifdef CARB
+     &                           OCEAN(ng) % pH,                        &
+     &                           OCEAN(ng) % CO2flx,                    &
+     &                           OCEAN(ng) % omega_arag,                &
+     &                           OCEAN(ng) % CO2star,                   &
+     &                           OCEAN(ng) % pCO2,                      &
+#endif
+#if defined ISO || defined ISO_13C
+     &                           OCEAN(ng) % F13Cas,                   &
+     &                           OCEAN(ng) % F13Csa,                   &
+#endif
+#if defined DIAGNOSTICS_BIO
+     &                           DIAGS(ng) % DiaBio2d,                  &
+     &                           DIAGS(ng) % DiaBio3d,                  &
+#endif
+     &                           OCEAN(ng) % t)
+
+#ifdef PROFILE
+      CALL wclock_off (ng, iNLM, 15, __LINE__, MyFile)
+#endif
+      RETURN
+      END SUBROUTINE biology
+!
+!-----------------------------------------------------------------------
+      SUBROUTINE nemuro_restruct_tile (ng, tile,                        &
+     &                                 LBi, UBi, LBj, UBj, UBk, UBt,    &
+     &                                 IminS, ImaxS, JminS, JmaxS,      &
+     &                                 nstp, nnew,                      &
+#ifdef MASKING
+     &                                 rmask,                           &
+#endif
+     &                                 Hz, z_r, z_w,                    &
+     &                                 srflx,                           &
+#ifdef OAE
+     &                                 OAEflux,                          &
+#endif
+#ifdef DOR
+     &                                 DORflux,                         &
+#endif
+#ifdef DAILY_SHORTWAVE
+     &                                 srflx_avg,                       &
+#endif
+#if defined ATTSW_LIN
+     &                                 h,                               &
+#endif
+#if defined CARB || defined OXY
+# ifdef BULK_FLUXES
+     &                                 Uwind, Vwind,                    &
+# else
+     &                                 sustr, svstr,                    &
+# endif
+#endif
+#ifdef CARB
+     &                                 pH, CO2flx, omega_arag,          &
+     &                                 CO2star, pCO2,                   &
+# if defined ISO || defined ISO_13C
+     &                                 F13Cas, F13Csa,                  &
+# endif
+#endif
+#if defined DIAGNOSTICS_BIO
+     &                                 DiaBio2d, DiaBio3d,              &
+#endif
+     &                                 t)
+!-----------------------------------------------------------------------
+!
+      USE mod_param
+      USE mod_biology
+      USE mod_ncparam
+      USE mod_scalars
+      USE mod_nemuro_sms
+!#if defined CARB
+!      USE mod_biology, ONLY: pCO2_water
+!#endif
+!
+!  Imported variable declarations.
+!
+      integer, intent(in) :: ng, tile
+      integer, intent(in) :: LBi, UBi, LBj, UBj, UBk, UBt
+      integer, intent(in) :: IminS, ImaxS, JminS, JmaxS
+      integer, intent(in) :: nstp, nnew
+#if defined ATTSW_LIN
+      real(r8), intent(in) :: h(LBi:,LBj:)
+#endif
+#ifdef ASSUMED_SHAPE
+# ifdef MASKING
+      real(r8), intent(in) :: rmask(LBi:,LBj:)
+# endif
+      real(r8), intent(in) :: Hz(LBi:,LBj:,:)
+      real(r8), intent(in) :: z_r(LBi:,LBj:,:)
+      real(r8), intent(in) :: z_w(LBi:,LBj:,0:)
+      real(r8), intent(in) :: srflx(LBi:,LBj:)
+# ifdef OAE
+	  real(r8), intent(in) :: OAEflux(LBi:,LBj:)
+# endif
+# ifdef DOR
+	  real(r8), intent(in) :: DORflux(LBi:,LBj:)
+# endif
+# ifdef DAILY_SHORTWAVE
+      real(r8), intent(in) :: srflx_avg(LBi:,LBj:)
+# endif
+# if defined CARB || defined OXY
+#  ifdef BULK_FLUXES
+      real(r8), intent(in) :: Uwind(LBi:,LBj:)
+      real(r8), intent(in) :: Vwind(LBi:,LBj:)
+#  else
+      real(r8), intent(in) :: sustr(LBi:,LBj:)
+      real(r8), intent(in) :: svstr(LBi:,LBj:)
+#  endif
+# endif
+# ifdef CARB
+      real(r8), intent(inout) :: pH(LBi:,LBj:,:)
+      real(r8), intent(inout) :: CO2flx(LBi:,LBj:)
+#  if defined ISO || defined ISO_13C
+      real(r8), intent(inout) :: F13Cas(LBi:,LBj:)
+      real(r8), intent(inout) :: F13Csa(LBi:,LBj:)
+#  endif 
+      real(r8), intent(inout) :: omega_arag(LBi:,LBj:,:)
+      real(r8), intent(inout) :: CO2star(LBi:,LBj:,:)
+      real(r8), intent(inout) :: pCO2(LBi:,LBj:,:)
+# endif
+# ifdef DIAGNOSTICS_BIO
+      real(r8), intent(inout) :: DiaBio2d(LBi:,LBj:,:)
+      real(r8), intent(inout) :: DiaBio3d(LBi:,LBj:,:,:)
+# endif
+      real(r8), intent(inout) :: t(LBi:,LBj:,:,:,:)
+#else
+# ifdef MASKING
+      real(r8), intent(in) :: rmask(LBi:UBi,LBj:UBj)
+# endif
+      real(r8), intent(in) :: Hz(LBi:UBi,LBj:UBj,UBk)
+      real(r8), intent(in) :: z_r(LBi:UBi,LBj:UBj,UBk)
+      real(r8), intent(in) :: z_w(LBi:UBi,LBj:UBj,0:UBk)
+      real(r8), intent(in) :: srflx(LBi:UBi,LBj:UBj)
+# ifdef OAE
+	  real(r8), intent(in) :: OAEflux(LBi:UBi,LBj:UBj)
+# endif
+# ifdef DOR
+	  real(r8), intent(in) :: DORflux(LBi:UBi,LBj:UBj)
+# endif
+# ifdef DAILY_SHORTWAVE
+      real(r8), intent(in) :: srflx_avg(LBi:UBi,LBj:UBj)
+# endif
+# if defined CARB || defined OXY
+#  ifdef BULK_FLUXES
+      real(r8), intent(in) :: Uwind(LBi:UBi,LBj:UBj)
+      real(r8), intent(in) :: Vwind(LBi:UBi,LBj:UBj)
+#  else
+      real(r8), intent(in) :: sustr(LBi:UBi,LBj:UBj)
+      real(r8), intent(in) :: svstr(LBi:UBi,LBj:UBj)
+#  endif
+# endif
+# ifdef CARB
+      real(r8), intent(inout) :: pH(LBi:UBi,LBj:UBj,UBk)
+      real(r8), intent(inout) :: CO2flx(LBi:UBi,LBj:UBj)
+#  if defined ISO || defined ISO_13C 
+      real(r8), intent(inout) :: F13Cas(LBi:UBi,LBj:UBj) 
+      real(r8), intent(inout) :: F13Csa(LBi:UBi,LBj:UBj) 
+#  endif 
+      real(r8), intent(inout) :: CO2star(LBi:UBi,LBj:UBj,UBk)
+      real(r8), intent(inout) :: omega_arag(LBi:UBi,LBj:UBj,UBk)
+      real(r8), intent(inout) :: pCO2(LBi:UBi,LBj:UBj,UBk)
+# endif
+# ifdef DIAGNOSTICS_BIO
+      real(r8), intent(inout) :: DiaBio2d(LBi:UBi,LBj:UBj,NDbio2d)
+      real(r8), intent(inout) :: DiaBio3d(LBi:UBi,LBj:UBj,UBk,NDbio3d)
+# endif
+      real(r8), intent(inout) :: t(LBi:UBi,LBj:UBj,UBk,3,UBt)
+#endif
+!
+!  Local variable declarations.
+!
+      integer :: Iter, ibio, itrc
+      integer :: i, j, k
+      real(r8) :: dtdays, dz
+      real(r8) :: cff
+#ifdef CONSERVATION
+      real(r8) :: delta_dissolved = 0
+      real(r8) :: delta_alk = 0
+
+#endif
+#ifdef CARB
+      real(r8) :: cffC
+# ifdef MASKING
+      real(r8) :: maskik
+# endif
+#endif
+
+      real(r8), dimension(IminS:ImaxS) :: PARsur
+
+      real(r8), dimension(NT(ng),2) :: BioTrc
+
+      real(r8), dimension(IminS:ImaxS,N(ng),NT(ng)) :: Bio
+      real(r8), dimension(IminS:ImaxS,N(ng),NT(ng)) :: Bio_old
+
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: Hz_inv
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: Hz_inv2
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: Hz_inv3
+#if defined NEM_IRON_LIMIT 
+# ifdef NEM_IRON_RELAX
+      real(r8) :: FeNudgCoef
+# endif
+# ifdef NEM_IRON_RSIN
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: LPSiN
+      real(r8) :: FNratio, FCratio, FCratioE, Flimit
+      !real(r8) :: cffFe
+      !real(r8), parameter :: Fe_min = 0.05_r8
+      !real(r8), parameter :: Fe_max = 2.0_r8
+      real(r8), parameter :: SiN_min = 1.0_r8
+      real(r8), parameter :: SiN_max = 3.0_r8
+      real(r8), parameter :: MinVal = 1.0e-6_r8
+# endif
+#endif
+#if defined NEMURO_CHL_GEIDER || defined NEMURO_CHL_NUDGECHL2N
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: Chl2NS,Chl2NL
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: LightChl
+# if defined NEMURO_CHL_GEIDER
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: BSS,BSL
+# endif
+#endif
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: LightL
+      real(r8), dimension(IminS:ImaxS,N(ng)) :: LightS
+# ifdef DIAGNOSTICS_BIO
+      real(r8), dimension(IminS:ImaxS,NDbio2d) :: DiaBio2dJ
+      real(r8), dimension(IminS:ImaxS,N(ng),NDbio3d) :: DiaBio3dJ
+      integer :: ivar
+# endif
+
+#include "set_bounds.h"
+#if defined DIAGNOSTICS_BIO
+!
+!-----------------------------------------------------------------------
+! If appropriate, initialize time-averaged diagnostic arrays.
+!-----------------------------------------------------------------------
+!
+      IF (((iic(ng).gt.ntsDIA(ng)).and.                                 &
+     &     (MOD(iic(ng),nDIA(ng)).eq.1)).or.                            &
+     &    ((iic(ng).ge.ntsDIA(ng)).and.(nDIA(ng).eq.1)).or.             &
+     &    ((nrrec(ng).gt.0).and.(iic(ng).eq.ntstart(ng)))) THEN
+        DO ivar=1,NDbio2d
+          DO j=Jstr,Jend
+            DO i=Istr,Iend
+              DiaBio2d(i,j,ivar)=0.0_r8
+            END DO
+          END DO
+        END DO
+        DO ivar=1,NDbio3d
+          DO k=1,N(ng)
+            DO j=Jstr,Jend
+              DO i=Istr,Iend
+                DiaBio3d(i,j,k,ivar)=0.0_r8
+              END DO
+            END DO
+          END DO
+        END DO
+      END IF
+#endif
+!
+!-----------------------------------------------------------------------
+!  Add biological Source/Sink terms.
+!-----------------------------------------------------------------------
+!
+!  Avoid computing source/sink terms if no biological iterations.
+!
+      IF (BioIter(ng).le.0) RETURN
+!!!
+!!!  Set time-stepping size (days) according to the number of iterations.
+!!!
+!!      dtdays=dt(ng)*sec2day/REAL(BioIter(ng),r8)
+!!!
+!!!  Set vertical sinking indentification vector.
+!!!
+!!      idsink(1)=iPON_                 ! particulate organic nitrogen
+!!      idsink(2)=iopal                 ! particulate organic silica
+!!#if defined CARB & ! defined KO_CAR_NLMB_SINK
+!!      idsink(3)=iCalC                 ! carbon detritus
+!!#endif
+!!!
+!!!  Set vertical sinking velocity vector in the same order as the
+!!!  identification vector, IDSINK.
+!!!
+!!      Wbio(1)=setVPON(ng)             ! particulate organic nitrogen
+!!      Wbio(2)=setVOpal(ng)            ! particulate organic silica
+!!#if defined CARB & ! defined KO_CAR_NLMB_SINK
+!!      Wbio(3)=setVPON(ng)             ! carbon detritus
+!!#endif
+!
+!  Compute inverse thickness to avoid repeated divisions.
+!
+      J_LOOP : DO j=Jstr,Jend
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+            Hz_inv(i,k)=1.0_r8/Hz(i,j,k)
+          END DO
+        END DO
+        DO k=1,N(ng)-1
+          DO i=Istr,Iend
+            Hz_inv2(i,k)=1.0_r8/(Hz(i,j,k)+Hz(i,j,k+1))
+          END DO
+        END DO
+        DO k=2,N(ng)-1
+          DO i=Istr,Iend
+            Hz_inv3(i,k)=1.0_r8/(Hz(i,j,k-1)+Hz(i,j,k)+Hz(i,j,k+1))
+          END DO
+        END DO
+!
+!  Extract biological variables from tracer arrays, place them into
+!  scratch arrays, and restrict their values to be positive definite.
+!  At input, all tracers (index nnew) from predictor step have
+!  transport units (m Tunits) since we do not have yet the new
+!  values for zeta and Hz. These are known after the 2D barotropic
+!  time-stepping.
+!
+        DO itrc=1,NBT
+          ibio=idbio(itrc)
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+# ifdef MASKING
+              IF (rmask(i,j).EQ.1) THEN
+# endif
+
+# ifdef NEG_ALERT
+               IF ((ibio.NE.12) .AND. (ibio.NE.13) .AND. (ibio.NE.33)) THEN
+                IF (t(i,j,k,nstp,ibio).LE.0.0_r8) THEN
+                  print *, "before nemuro nstp i,j,k,ibio(eq to tracer#),val=", i,j,k,ibio,t(i,j,k,nstp,ibio)
+                ENDIF
+                IF (t(i,j,k,nstp,ibio).LE.0.0_r8) THEN
+                  print *, "negative alert!"
+                ENDIF
+               ENDIF
+               IF ((ibio.NE.12) .AND. (ibio.NE.13) .AND. (ibio.NE.33)) THEN
+                IF (t(i,j,k,nnew,ibio).LE.0.0_r8) THEN
+                  print *, "before nemuro nnew i,j,k,ibio(eq to tracer#),val=", i,j,k,ibio,t(i,j,k,nnew,ibio)
+                ENDIF
+                IF (t(i,j,k,nnew,ibio).LE.0.0_r8) THEN
+                  print *, "negative alert!"
+                ENDIF
+               ENDIF
+# endif
+               Bio_old(i,k,ibio)=MAX(0.0_r8,t(i,j,k,nstp,ibio))
+               Bio(i,k,ibio)=Bio_old(i,k,ibio)
+# ifdef MASKING
+              ENDIF
+# endif
+            END DO
+          END DO
+        END DO
+# ifdef DIAGNOSTICS_BIO
+!  
+!  Initialize local (J-slice) diagnostic variables 
+!  
+        DO ivar=1,NDbio2d
+          DO i=Istr,Iend
+            DiaBio2dJ(i,ivar)=0.0_r8
+          END DO
+        END DO
+        DO ivar=1,NDbio3d
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+              DiaBio3dJ(i,k,ivar)=0.0_r8
+            END DO
+          END DO
+        END DO
+# endif
+! TODO merge this with above
+#ifdef CARB
+!! TODO how important are the limits?
+!        DO k=1,N(ng)
+!          DO i=Istr,Iend
+!            Bio_old(i,k,iTIC_)=MAX(t(i,j,k,nstp,iTIC_),0.0_r8)
+!            Bio_old(i,k,iTAlk)=MAX(t(i,j,k,nstp,iTAlk),0.0_r8)
+!            Bio_old(i,k,iCalC)=MAX(t(i,j,k,nstp,iCalC),0.0_r8)
+!            Bio_old(i,k,iTIC_)=MIN(Bio_old(i,k,iTIC_),3000.0_r8)
+!            Bio_old(i,k,iTIC_)=MAX(Bio_old(i,k,iTIC_),400.0_r8)
+!            Bio(i,k,iTIC_)=Bio_old(i,k,iTIC_)
+!            Bio(i,k,iTAlk)=Bio_old(i,k,iTAlk)
+!            Bio(i,k,iCalC)=Bio_old(i,k,iCalC)
+!          END DO
+!        END DO
+#endif
+!
+!  Extract potential temperature and salinity.
+!
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+            Bio(i,k,itemp)=t(i,j,k,nstp,itemp)
+#if defined OXY || defined CARB
+! TODO Jerome added this, keep?
+!           Bio(i,k,itemp)=MIN(t(i,j,k,nstp,itemp),35.0_r8)
+            Bio(i,k,isalt)=t(i,j,k,nstp,isalt)
+#endif
+          END DO
+        END DO
+#if defined NEMURO_CHL && defined LOGDIAGNOSTICS_NEM_CHL
+        IF (j==LOGDIAGNOSTICS_NEM_CHL_J.and.LOGDIAGNOSTICS_NEM_CHL_I.ge.Istr.and.LOGDIAGNOSTICS_NEM_CHL_I.le.Iend) THEN
+          i=LOGDIAGNOSTICS_NEM_CHL_I
+          k=LOGDIAGNOSTICS_NEM_CHL_K
+          write(*,'(2a,3(i0,a))') 'LOGDIAGNOSTICS_NEM_CHL',             &
+     &      ' reporting values at (',i,',',j,',',k,')'
+          write(*,'(a30,f19.12)') 'initial Sphy = ',Bio(i,k,iSphy)
+# if ! defined NEMURO_CHL_STATICRATIO
+          write(*,'(a30,f19.12)') 'initial ChlS = ',Bio(i,k,iChlS)
+# endif
+          write(*,'(a30,f19.12)') 'initial Lphy = ',Bio(i,k,iLphy)
+# if ! defined NEMURO_CHL_STATICRATIO
+          write(*,'(a30,f19.12)') 'initial ChlL = ',Bio(i,k,iChlL)
+# endif
+          write(*,'(a30,f19.12)') 'initial Chlo = ',Bio(i,k,iChlo)
+# if ! defined NEMURO_CHL_STATICRATIO
+          if (Bio(i,k,iChlo).lt.Bio(i,k,iChlS)) then
+            write(*,'(a30,f19.12)') '!!! Chlo - ChlS = ',               &
+     &        Bio(i,k,iChlo) - Bio(i,k,iChlS)
+          end if
+# endif
+        END IF
+#endif
+!
+!  Calculate surface Photosynthetically Available Radiation (PAR).  The
+!  net shortwave radiation is scaled back to Watts/m2 and multiplied by
+!  the fraction that is photosynthetically available, PARfrac.
+!
+        DO i=Istr,Iend
+#if defined LET_THERE_BE_LIGHT
+          PARsur(i)=100.0_r8
+#else
+# if defined DAILY_SHORTWAVE
+!  srflx_avg is used only for biology and is not rescaled
+!  by rho0*Cp on input in inp_par.F.
+!  It does not need to be rescaled back to W/m2 here.
+          PARsur(i)=PARfrac(ng)*srflx_avg(i,j)
+# else
+          PARsur(i)=PARfrac(ng)*srflx(i,j)*rho0*Cp
+# endif
+#endif
+        END DO
+#if defined NEM_IRON_LIMIT && defined NEM_IRON_RELAX
+! CAE not sure if this code block should go into a subroutine or not.
+!
+!  Set nudging coefficient for dissolved iron over the shelf.
+!
+      FeNudgCoef=dt(ng)/(FeNudgTime(ng)*86400.0_r8)
+!
+!  Relax dissolved iron at coast (h <= FeHim) to a constant value
+!  (FeMax) over a time scale (FeNudgTime; days) to simulate sources
+!  at the shelf. Use -z_w(i,j,0) for h(i,j).
+!
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+            IF (-z_w(i,j,0).le.FeHmin(ng)) THEN
+              Bio(i,k,iFeD_)=Bio(i,k,iFeD_)+                            &
+     &                       FeNudgCoef*(FeMax(ng)-Bio(i,k,iFeD_))
+            END IF
+          END DO
+        END DO
+#endif
+#if defined NEM_IRON_LIMIT && defined NEM_IRON_RSIN
+!
+!  Variable Si:N ratio for dimatoms based on dissolved iron concentration
+!  Si:N varies between 1:1 (high iron) and 3:1 (low iron)
+        DO k=1,N(ng)
+          DO i=Istr,Iend
+            !Fe_min = 0.05_r8
+            !Fe_max = 2.0_r8
+            !SiN_min = 1.0_r8
+            !SiN_max = 3.0_r8
+            !cffFe=max(0.0_r8,min(1.0_r8,(Bio(i,k,iFeD_)-Fe_min)/        &
+     &      !        (Fe_max-Fe_min)))
+            !LPSiN(i,k)=SiN_max-cffFe*(SiN_max-SiN_min)
+! new (2019) way to do LPSiN, based on Flimit, not on FeD_.
+! Could calculate this right in phytoplankton_ppl, but then 
+! would need to calcuate it also for phytoplankton_mortality.
+! I just calculate here once.  Paul will have to sort out how to 
+! efficiently place this calculation for TL and AD code and avoid redundancy. 
+            FNratio=Bio(i,k,iFeLp)/MAX(MinVal,Bio(i,k,iLphy))
+            FCratio=FNratio*FeN2FeC
+            FCratioE= B_Fe(ng)*Bio(i,k,iFeD_)**A_Fe(ng)
+            Flimit = FCratio**2.0_r8/                                 &
+     &               (FCratio**2.0_r8+LK_FeC(ng)**2.0_r8)
+            LPSiN(i,k)=SiN_max-Flimit*(SiN_max-SiN_min)
+            !LPSiN(i,k)=SiN_min + (SiN_max-SiN_min) *                  &
+     &      !           MAX( MIN( Flimit, 1.0_r8 ), 0.0_r8 )
+            !LPSiN(i,k)=SiN_min + (SiN_max-SiN_min) *                  &
+     &      !           MAX( MIN( (Flimit-0.1_r8)/0.8_r8, 1.0_r8 ), 0.0_r8 )
+            !LPSiN(i,k)=SiN_min + ((SiN_max-SiN_min) *                &
+     &      !           0.5_r8*(1.0_r8 + TANH((Flimit-0.5_r8)/0.25_r8))
+
+
+          END DO
+        END DO
+#endif
+!
+!=======================================================================
+!  Start internal iterations to achieve convergence of the nonlinear
+!  backward-implicit solution.
+!=======================================================================
+!
+!  During the iterative procedure a series of fractional time steps are
+!  performed in a chained mode (splitting by different biological
+!  conversion processes) in sequence of the main food chain.  In all
+!  stages the concentration of the component being consumed is treated
+!  in a fully implicit manner, so the algorithm guarantees non-negative
+!  values, no matter how strong the concentration of active consuming
+!  component (Phytoplankton or Zooplankton).  The overall algorithm,
+!  as well as any stage of it, is formulated in conservative form
+!  (except explicit sinking) in sense that the sum of concentration of
+!  all components is conserved.
+!
+!  In the implicit algorithm, we have for example (N: nutrient,
+!                                                  P: phytoplankton),
+!
+!     N(new) = N(old) - uptake * P(old)     uptake = mu * N / (Kn + N)
+!                                                    {Michaelis-Menten}
+!  below, we set
+!                                           The N in the numerator of
+!     cff = mu * P(old) / (Kn + N(old))     uptake is treated implicitly
+!                                           as N(new)
+!
+!  so the time-stepping of the equations becomes:
+!
+!     N(new) = N(old) / (1 + cff)     (1) when substracting a sink term,
+!                                         consuming, divide by (1 + cff)
+!  and
+!
+!     P(new) = P(old) + cff * N(new)  (2) when adding a source term,
+!                                         growing, add (cff * source)
+!
+!  Notice that if you substitute (1) in (2), you will get:
+!
+!     P(new) = P(old) + cff * N(old) / (1 + cff)    (3)
+!
+!  If you add (1) and (3), you get
+!
+!     N(new) + P(new) = N(old) + P(old)
+!
+!  implying conservation regardless how "cff" is computed. Therefore,
+!  this scheme is unconditionally stable regardless of the conversion
+!  rate. It does not generate negative values since the constituent
+!  to be consumed is always treated implicitly. It is also biased
+!  toward damping oscillations.
+!
+!  The iterative loop below is to iterate toward an universal Backward-
+!  Euler treatment of all terms. So if there are oscillations in the
+!  system, they are only physical oscillations. These iterations,
+!  however, do not improve the accuracy of the solution.
+!
+        ITER_LOOP: DO Iter=1,BioIter(ng)
+!
+!  Compute light attenuation as function of depth.
+!
+#if ! defined KO_LIG_NLM
+          CALL light_attenuation(tile, ng, j, IminS, ImaxS,             &
+     &                            LBi, LBj,                             &
+# if ! defined ASSUMED_SHAPE
+     &                            UBi, UBj, UBk,                        &
+# endif
+# if defined NEMURO_CHL_GEIDER || defined NEMURO_CHL_NUDGECHL2N
+     &                            LightChl,                             &
+# endif
+     &                            LightS, LightL, PARsur, z_w, Bio)
+#endif
+#if defined NEMURO_CHL_NUDGECHL2N
+!
+!  Compute chlorophyll:N ratios.
+!
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+              Chl2NS(i,k)=MIN(Chl2NS_max(ng),MAX(Chl2NS_min(ng),        &
+     &          Bio(i,k,iChlS)/MAX(BIOmin,Bio(i,k,iSphy))))
+              Chl2NL(i,k)=MIN(Chl2NL_max(ng),MAX(Chl2NL_min(ng),        &
+     &          Bio(i,k,iChlL)/MAX(BIOmin,Bio(i,k,iLphy))))
+            END DO
+          END DO
+#endif
+#if (defined ISO && defined CARB)
+!
+!-----------------------------------------------------------------------
+!  Surface carbon isotope fluxes due to CO2 gas exchange.
+!-----------------------------------------------------------------------
+!
+#if ! defined KO_COX_NLM
+          CALL co2_exchange_iso(tile, ng, j, IminS, ImaxS,              &
+     &      LBi, LBj,                                                   &
+# if ! defined ASSUMED_SHAPE
+     &      UBi, UBj,                                                   &
+# endif
+#ifdef MASKING
+     &      rmask,                                                      &
+#endif
+# if defined BULK_FLUXES
+     &      Uwind, Vwind,                                               &
+# else
+     &      sustr, svstr,                                               &
+# endif
+#if defined DIAGNOSTICS_ISO
+     &      DiaBio2dJ,                                                  &
+#endif
+     &      pH, F13Cas, F13Csa, CO2flx, omega_arag, CO2star, pCO2,      &
+     &      Hz_inv, Bio)
+#endif
+#endif
+
+#if (defined ISO_13C && defined CARB)
+!
+!-----------------------------------------------------------------------
+!  Surface carbon isotope fluxes due to CO2 gas exchange.
+!-----------------------------------------------------------------------
+!
+#if ! defined KO_COX_NLM
+          CALL co2_exchange_iso_13C(tile, ng, j, IminS, ImaxS,              &
+     &      LBi, LBj,                                                   &
+# if ! defined ASSUMED_SHAPE
+     &      UBi, UBj,                                                   &
+# endif
+#ifdef MASKING
+     &      rmask,                                                      &
+#endif
+# if defined BULK_FLUXES
+     &      Uwind, Vwind,                                               &
+# else
+     &      sustr, svstr,                                               &
+# endif
+#if defined DIAGNOSTICS_ISO
+     &      DiaBio2dJ,                                                  &
+#endif
+     &      pH, F13Cas, F13Csa, CO2flx, omega_arag, CO2star, pCO2,      &
+     &      Hz_inv, Bio)
+#endif
+#endif
+
+#if defined CARB && ! (defined ISO || defined ISO_13C)
+!
+!-----------------------------------------------------------------------
+!  Surface CO2 gas exchange.
+!-----------------------------------------------------------------------
+!
+#if ! defined KO_COX_NLM
+          CALL co2_exchange(tile, ng, j, IminS, ImaxS,                  &
+     &      LBi, LBj,                                                   &
+# if ! defined ASSUMED_SHAPE
+     &      UBi, UBj,                                                   &
+# endif
+#ifdef MASKING
+     &      rmask,                                                      &
+#endif
+# if defined BULK_FLUXES
+     &      Uwind, Vwind,                                               &
+# else
+     &      sustr, svstr,                                               &
+# endif
+     &      pH, CO2flx, omega_arag, CO2star, pCO2,                      &
+     &      Hz_inv, Bio)
+#endif
+#endif
+!
+!-----------------------------------------------------------------------
+!  Phytoplankton primary productivity.
+!-----------------------------------------------------------------------
+!
+#if defined NEMURO_CHL_NUDGECHL2N_EXTRAOUT2
+          if (j==NEMURO_CHL_NUDGECHL2N_EXTRAOUT_J) then
+            i=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_I
+            if (Istr.le.i.and.i.le.Iend) then
+              k=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_K
+              write(*,'(a20,f19.12,a10,f19.12)') ':::1 NL    Sphy =',   &
+     &          Bio(i,k,iSphy), ' Lphy =',Bio(i,k,iLphy)
+              write(*,'(a20,f19.12,a10,f19.12)') ':::1 NL    ChlS =',   &
+     &          Bio(i,k,iChlS), ' ChlL =',Bio(i,k,iChlL)
+              write(*,'(a20,f19.12,a10,f19.12)') ':::1 NL    LigS =',   &
+     &          LightS(i,k), ' LigL =',LightL(i,k)
+              write(*,'(a20,f19.12,a10,f19.12)') ':::1 NL    LSur =',   &
+     &          PARsur(i), '  z_w =',z_w(i,j,k)
+            end if
+          end if
+#endif
+
+#if ! defined KO_PPS_NLM
+          CALL phytoplankton_pps(tile, ng, IminS, ImaxS, LightS, Bio    &
+# if defined NEMURO_CHL_GEIDER
+     &                            , Chl2NS, LightChl, BSS               &
+# endif
+#if defined NEM_IRON_LIMIT
+     &                            , J                                   &
+#endif
+#if defined DIAGNOSTICS_BIO
+     &                            , DiaBio3dJ                           &
+#endif
+#if defined LOGDIAGNOSTICS_NEM_CHL || defined NEMURO_CHL_EXITONNEGATIVE
+     &                            , j                                   &
+#endif
+#if defined ISO || defined ISO_13C
+     &                               , CO2star                          &
+#endif
+     &                            )
+# endif
+#if defined NEMURO_CHL_NUDGECHL2N_EXTRAOUT2
+          if (j==NEMURO_CHL_NUDGECHL2N_EXTRAOUT_J) then
+            i=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_I
+            if (Istr.le.i.and.i.le.Iend) then
+              k=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_K
+              write(*,'(a20,f19.12,a10,f19.12)') ':::2 NL    Sphy =',   &
+     &          Bio(i,k,iSphy), ' Lphy =',Bio(i,k,iLphy)
+            end if
+          end if
+#endif
+#if ! defined KO_PPL_NLM
+          CALL phytoplankton_ppl(tile, ng, IminS, ImaxS, LightL, Bio    &
+# if defined NEM_IRON_LIMIT && defined NEM_IRON_RSIN
+     &                            , LPSiN                               &
+# endif
+# if defined NEMURO_CHL_GEIDER
+     &                            , Chl2NL, LightChl, BSL               &
+# endif
+#if defined DIAGNOSTICS_BIO
+     &                            , DiaBio3dJ                           &
+#endif
+#if defined LOGDIAGNOSTICS_NEM_CHL || defined NEMURO_CHL_EXITONNEGATIVE
+     &                            , j                                   &
+#endif
+#if defined ISO || defined ISO_13C
+     &                            , CO2star                             &
+#endif
+     &                            )
+#endif
+#if defined NEMURO_CHL_NUDGECHL2N_EXTRAOUT2
+          if (j==NEMURO_CHL_NUDGECHL2N_EXTRAOUT_J) then
+            i=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_I
+            if (Istr.le.i.and.i.le.Iend) then
+              k=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_K
+              write(*,'(a20,f19.12,a10,f19.12)') ':::3 NL    Sphy =',   &
+     &          Bio(i,k,iSphy), ' Lphy =',Bio(i,k,iLphy)
+            end if
+          end if
+#endif
+!
+!-----------------------------------------------------------------------
+!  Phytoplankton mortality to particulate organic nitrogen.
+!-----------------------------------------------------------------------
+!
+#if ! defined KO_PMO_NLM
+          CALL phytoplankton_mortality(tile, ng, IminS, ImaxS, Bio      &
+# if defined NEM_IRON_LIMIT && defined NEM_IRON_RSIN
+     &                            , LPSiN                               &
+# endif
+# if defined NEM_SPONGE
+     &                            , j                                   &
+# endif
+#if defined DIAGNOSTICS_BIO
+     &                            , DiaBio3dJ                           &
+#endif
+     &                            )
+#endif
+#if defined NEMURO_CHL_NUDGECHL2N_EXTRAOUT2
+          if (j==NEMURO_CHL_NUDGECHL2N_EXTRAOUT_J) then
+            i=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_I
+            if (Istr.le.i.and.i.le.Iend) then
+              k=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_K
+              write(*,'(a20,f19.12,a10,f19.12)') ':::4 NL    Sphy =',   &
+     &          Bio(i,k,iSphy), ' Lphy =',Bio(i,k,iLphy)
+            end if
+          end if
+#endif
+!
+!-----------------------------------------------------------------------
+!  Zooplankton grazing, egestion and excretion.
+!-----------------------------------------------------------------------
+!
+#if ! defined KO_ZGR_NLM
+          CALL zooplankton_grazing(tile, ng, IminS, ImaxS, Bio          &
+# if defined NEM_IRON_LIMIT && defined NEM_IRON_RSIN
+     &                            , LPSiN                               &
+# endif
+#if defined DIAGNOSTICS_BIO
+     &                             , DiaBio3dJ                          &
+#endif
+     &                             )
+#endif
+#if defined NEMURO_CHL_NUDGECHL2N_EXTRAOUT2
+          if (j==NEMURO_CHL_NUDGECHL2N_EXTRAOUT_J) then
+            i=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_I
+            if (Istr.le.i.and.i.le.Iend) then
+              k=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_K
+              write(*,'(a20,f19.12,a10,f19.12)') ':::5 NL    Sphy =',   &
+     &          Bio(i,k,iSphy), ' Lphy =',Bio(i,k,iLphy)
+            end if
+          end if
+#endif
+!
+!-----------------------------------------------------------------------
+!  Zooplankton mortality to particulate organic nitrogen.
+!-----------------------------------------------------------------------
+!
+#if ! defined KO_ZMO_NLM
+          CALL zooplankton_mortality(tile, ng, IminS, ImaxS, Bio        &
+#if defined DIAGNOSTICS_BIO
+     &                               , DiaBio3dJ                        &
+#endif
+     &                               )
+#endif
+#if defined NEMURO_CHL_NUDGECHL2N_EXTRAOUT2
+          if (j==NEMURO_CHL_NUDGECHL2N_EXTRAOUT_J) then
+            i=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_I
+            if (Istr.le.i.and.i.le.Iend) then
+              k=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_K
+              write(*,'(a20,f19.12,a10,f19.12)') ':::6 NL    Sphy =',   &
+     &          Bio(i,k,iSphy), ' Lphy =',Bio(i,k,iLphy)
+            end if
+          end if
+#endif
+!
+!-----------------------------------------------------------------------
+!  Nutrient decomposition.
+!-----------------------------------------------------------------------
+!
+#if ! defined KO_NDE_NLM
+          CALL nutrient_decomposition(tile, ng, IminS, ImaxS, Bio       &
+#if defined DIAGNOSTICS_BIO
+     &                                , DiaBio3dJ                       &
+#endif
+     &                                )
+#endif
+#if defined NEMURO_CHL_NUDGECHL2N_EXTRAOUT2
+          if (j==NEMURO_CHL_NUDGECHL2N_EXTRAOUT_J) then
+            i=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_I
+            if (Istr.le.i.and.i.le.Iend) then
+              k=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_K
+              write(*,'(a20,f19.12,a10,f19.12)') ':::7 NL    Sphy =',   &
+     &          Bio(i,k,iSphy), ' Lphy =',Bio(i,k,iLphy)
+            end if
+          end if
+#endif
+#if defined NEMURO_CHL_NUDGECHL2N
+!
+!-----------------------------------------------------------------------
+!  Adjust chlorophyll towards light-dependent chlorophyll:N ratio.
+!-----------------------------------------------------------------------
+!
+# if defined NEMURO_CHL_NUDGECHL2N_EXTRAOUT2
+          if (j==NEMURO_CHL_NUDGECHL2N_EXTRAOUT_J) then
+            i=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_I
+            if (Istr.le.i.and.i.le.Iend) then
+              k=NEMURO_CHL_NUDGECHL2N_EXTRAOUT_K
+              write(*,'(a20,f19.12,a10,f19.12)') ':::8 NL    Sphy =',   &
+     &          Bio(i,k,iSphy), ' Lphy =',Bio(i,k,iLphy)
+            end if
+          end if
+# endif
+# if ! defined KO_CNU
+          CALL chlorophyll_nudge(tile, ng, IminS, ImaxS, Bio,           &
+     &      Chl2NS, Chl2NL, LightChl                                    &
+#  if defined LOGDIAGNOSTICS_NEM_CHL || defined NEMURO_CHL_EXITONNEGATIVE || defined NEMURO_CHL_NUDGECHL2N_EXTRAOUT
+     &      , j                                                         &
+#  endif
+     &      )
+# endif
+#endif
+#if defined NEMURO_CHL_GEIDER
+!
+!-----------------------------------------------------------------------
+!  Chlorophyll: Account for phytoplankton loss terms.
+!-----------------------------------------------------------------------
+!
+          CALL chlorophyll_loss(tile, ng, IminS, ImaxS, Bio,            &
+     &                          Chl2NS, Chl2NL, BSS, BSL                &
+#if defined DIAGNOSTICS_BIO
+     &                          , DiaBio3dJ                             &
+#endif
+#if defined LOGDIAGNOSTICS_NEM_CHL || defined NEMURO_CHL_EXITONNEGATIVE
+#endif
+     &                          )
+#endif
+#if defined OXY
+!
+!-----------------------------------------------------------------------
+!  Surface O2 gas exchange.
+!-----------------------------------------------------------------------
+!
+#if ! defined KO_O2X_NLM
+          CALL o2_exchange(tile, ng, j, IminS, ImaxS,                   &
+     &      LBi, LBj,                                                   &
+# if ! defined ASSUMED_SHAPE
+     &      UBi, UBj,                                                   &
+# endif
+# if defined BULK_FLUXES
+     &      Uwind, Vwind,                                               &
+# else
+     &      sustr, svstr,                                               &
+# endif
+     &      Hz_inv, Bio)
+#endif
+#endif
+#if defined OAE
+!
+!-----------------------------------------------------------------------
+!  Surface alkalinity addition. OAEflux (µmol m-2 s-1)
+!  model units are mEq m-3, so we convert by multiplying by the inverse 
+!  of cell thickness (Hz_inv; units 1/m), dividing by 1000 to convert 
+!  µmol to mmol, then multiply by dt to get rid of seconds
+!  (Hzm). Finishing with mmol m-3 (~mEq alkalinity m-3)
+!-----------------------------------------------------------------------
+!
+      DO i=Istr,Iend
+! Add TA flux from OAE to alkalinity tracer  
+        Bio(i,N(ng),iTAlk) = Bio(i,N(ng),iTAlk) + (OAEflux(i,j) * &
+        & Hz_inv(i,N(ng)) / 1000.0_r8 * dt(ng))
+! Accumulate TA from OAE in conservative tracer
+        Bio(i,N(ng),iOAE_) = Bio(i,N(ng),iOAE_) + OAEflux(i,j) * &
+        & Hz_inv(i,N(ng)) / 1000.0_r8 * dt(ng)
+      END DO
+
+#endif
+
+#if defined DOR && defined ISO
+!
+!-----------------------------------------------------------------------
+!  Surface DIC removal (DOR). DORflux (µmol m-2 s-1)
+!  model units are mEq m-3, so we convert by multiplying by the inverse 
+!  of cell thickness (Hz_inv; units 1/m), dividing by 1000 to convert 
+!  µmol to mmol, then multiply by dt to get rid of seconds
+!  (Hzm). Finishing with mmol m-3 
+!-----------------------------------------------------------------------
+!
+      DO i=Istr,Iend
+! Subtract the DOR flux from the TIC pool
+        Bio(i,N(ng),iTIC_) = Bio(i,N(ng),iTIC_) - (DORflux(i,j) * &
+        & Hz_inv(i,N(ng)) / 1000.0_r8 * dt(ng))
+        
+        ! Subtract the DOR flux from the DI13C pool
+        IF (Bio(i,N(ng),iTIC_) > 0.0_r8) THEN
+          Bio(i,N(ng),iDI13C) = Bio(i,N(ng),iDI13C) - (DORflux(i,j) *  &
+          & Hz_inv(i,N(ng)) / 1000.0_r8 * dt(ng) * Bio(i,N(ng),iDI13C)  &
+          & / Bio(i,N(ng),iTIC_))
+          Bio(i,N(ng),iDI14C) = Bio(i,N(ng),iDI14C) - (DORflux(i,j) *  &
+          & Hz_inv(i,N(ng)) / 1000.0_r8 * dt(ng) * Bio(i,N(ng),iDI14C)  &
+          & / Bio(i,N(ng),iTIC_))
+        ELSE
+          Bio(i,N(ng),iDI13C) = Bio(i,N(ng),iDI13C) - (DORflux(i,j) *  &
+          & Hz_inv(i,N(ng)) / 1000.0_r8 * dt(ng))
+          Bio(i,N(ng),iDI14C) = Bio(i,N(ng),iDI14C) - (DORflux(i,j) *  &
+          & Hz_inv(i,N(ng)) / 1000.0_r8 * dt(ng))
+        ENDIF
+! Accumulate DIC from DOR in conservative tracer
+        Bio(i,N(ng),iDOR_) = Bio(i,N(ng),iDOR_) + (DORflux(i,j) * &
+        & Hz_inv(i,N(ng)) / 1000.0_r8 * dt(ng))
+      END DO
+
+#endif
+
+#if defined DOR
+!
+!-----------------------------------------------------------------------
+!  Surface DIC removal (DOR). DORflux (µmol m-2 s-1)
+!  model units are mEq m-3, so we convert by multiplying by the inverse 
+!  of cell thickness (Hz_inv; units 1/m), dividing by 1000 to convert 
+!  µmol to mmol, then multiply by dt to get rid of seconds
+!  (Hzm). Finishing with mmol m-3 
+!-----------------------------------------------------------------------
+!
+      DO i=Istr,Iend
+! Subtract the DOR flux from the TIC pool
+        Bio(i,N(ng),iTIC_) = Bio(i,N(ng),iTIC_) - (DORflux(i,j) * &
+        & Hz_inv(i,N(ng)) / 1000.0_r8 * dt(ng))
+! Accumulate DIC from DOR in conservative tracer
+        Bio(i,N(ng),iDOR_) = Bio(i,N(ng),iDOR_) + (DORflux(i,j) * &
+        & Hz_inv(i,N(ng)) / 1000.0_r8 * dt(ng))
+      END DO
+
+#endif
+!
+!-----------------------------------------------------------------------
+!  Vertical sinking terms: PON and Opal.
+!-----------------------------------------------------------------------
+!
+          CALL sinking(tile, ng, j, IminS, ImaxS, LBi, LBj,             &
+# if ! defined ASSUMED_SHAPE
+     &                 UBi, UBj, UBk,                                   &
+# endif
+     &                 Hz, Hz_inv, Hz_inv2, Hz_inv3, z_w,               &
+     &                 Bio                                              &
+#if defined DIAGNOSTICS_BIO
+     &                 , DiaBio3d                                       &
+#endif
+     &                 )
+#if defined NEMURO_CHL_STATICRATIO
+!
+!-----------------------------------------------------------------------
+!  Chlorophyll with fixed N:Chl.
+!-----------------------------------------------------------------------
+!
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+              Bio(i,k,iChlo)=Bio(i,k,iLphy)*Chl2NL(ng)                  &
+     &                      +Bio(i,k,iSphy)*Chl2NS(ng)
+            END DO
+          END DO
+#elif defined NEMURO_CHL_GEIDER || defined NEMURO_CHL_NUDGECHL2N
+!
+!-----------------------------------------------------------------------
+!  Create total chlorophyll.
+!-----------------------------------------------------------------------
+!
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+              Bio(i,k,iChlo)=Bio(i,k,iChlS)+Bio(i,k,iChlL)
+            END DO
+          END DO
+#endif
+        END DO ITER_LOOP
+!
+!-----------------------------------------------------------------------
+!  Update global tracer variables: Add increment due to BGC processes
+!  to tracer array in time index "nnew". Index "nnew" is solution after
+!  advection and mixing and has transport units (m Tunits) hence the
+!  increment is multiplied by Hz.  Notice that we need to subtract
+!  original values "Bio_old" at the top of the routine to just account
+!  for the concentrations affected by BGC processes. This also takes
+!  into account any constraints (non-negative concentrations, carbon
+!  concentration range) specified before entering BGC kernel. If "Bio"
+!  were unchanged by BGC processes, the increment would be exactly
+!  zero. Notice that final tracer values, t(:,:,:,nnew,:) are not
+!  bounded >=0 so that we can preserve total inventory of nutrients
+!  when advection causes tracer concentration to go negative.
+!-----------------------------------------------------------------------
+!
+#ifdef CARB
+!! TODO: how important is this?
+!        DO k=1,N(ng)
+!          DO i=Istr,Iend
+!            Bio(i,k,iTIC_)=MIN(Bio(i,k,iTIC_),3000.0_r8)
+!            Bio(i,k,iTIC_)=MAX(Bio(i,k,iTIC_),400.0_r8)
+!          END DO
+!        END DO
+#endif
+        DO itrc=1,NBT
+          ibio=idbio(itrc)
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+#ifdef MASKING
+              IF (rmask(i,j).EQ.1) THEN
+#endif
+                cff=Bio(i,k,ibio)-Bio_old(i,k,ibio)
+!#ifdef NEG_ALERT
+!                IF ((i.EQ.88) .AND. (j.EQ.124) .AND. (k.EQ.14) .AND. (ibio.EQ.4)) THEN
+!                  print *, "Diatom:"
+!                  print *, "Bio(i,k,ibio), Bio_old(i,k,ibio)", Bio(i,k,ibio), Bio_old(i,k,ibio)
+!                  print *, "cff (Bio(i,k,ibio)-Bio_old(i,k,ibio)), Hz(i,j,k)",cff, Hz(i,j,k)
+!                  print *, "t(i,j,k,nnew,ibio) before", t(i,j,k,nnew,ibio)
+!                  print *, "new t(i,j,k,nnew,ibio)",t(i,j,k,nnew,ibio)+cff*Hz(i,j,k) 
+!                ENDIF
+!                IF ((i.EQ.88) .AND. (j.EQ.124) .AND. (k.EQ.14) .AND. (ibio.EQ.15)) THEN
+!                  print *, "Diatom15:"
+!                  print *, "Bio(i,k,ibio), Bio_old(i,k,ibio)", Bio(i,k,ibio), Bio_old(i,k,ibio)
+!                  print *, "cff (Bio(i,k,ibio)-Bio_old(i,k,ibio)), Hz(i,j,k)",cff, Hz(i,j,k)
+!                  print *, "t(i,j,k,nnew,ibio) before", t(i,j,k,nnew,ibio)
+!                  print *, "new t(i,j,k,nnew,ibio)",t(i,j,k,nnew,ibio)+cff*Hz(i,j,k)
+!                ENDIF
+!                IF ((i.EQ.88) .AND. (j.EQ.124) .AND. (k.EQ.14) .AND. (ibio.EQ.24)) THEN
+!                  print *, "Diatom14:"
+!                  print *, "Bio(i,k,ibio), Bio_old(i,k,ibio)", Bio(i,k,ibio), Bio_old(i,k,ibio)
+!                  print *, "cff (Bio(i,k,ibio)-Bio_old(i,k,ibio)), Hz(i,j,k)",cff, Hz(i,j,k)
+!                  print *, "t(i,j,k,nnew,ibio) before", t(i,j,k,nnew,ibio)
+!                  print *, "new t(i,j,k,nnew,ibio)",t(i,j,k,nnew,ibio)+cff*Hz(i,j,k)
+!                ENDIF
+!#endif
+
+                t(i,j,k,nnew,ibio)=t(i,j,k,nnew,ibio)+cff*Hz(i,j,k)
+
+#ifdef NEG_ALERT
+                IF ((ibio.NE.12) .AND. (ibio.NE.13) .AND. (ibio.NE.33)) THEN
+                 IF ((Bio(i,k,ibio).LE.0.0_r8) .OR. (Bio(i,k,ibio).NE.Bio(i,k,ibio))) THEN
+                   print *, "after nemuro in Bio i,j,k,ibio (eq to tracer #),val=", i,j,k,ibio,Bio(i,k,ibio)
+                 ENDIF
+                 IF ((Bio(i,k,ibio).LE.0.0_r8) .OR. (Bio(i,k,ibio).NE.Bio(i,k,ibio))) THEN
+                   print *, "negative alert! or NaN"
+                 ENDIF
+                 IF ((t(i,j,k,nnew,ibio).LE.0.0_r8) .OR. (t(i,j,k,nnew,ibio).NE.t(i,j,k,nnew,ibio))) THEN
+                   print *, "after nemuro in nnew i,j,k,ibio(eq to tracer #),val=", i,j,k,ibio,t(i,j,k,nnew,ibio)
+                 ENDIF
+                 IF ((t(i,j,k,nnew,ibio).LE.0.0_r8) .OR. (t(i,j,k,nnew,ibio).NE.t(i,j,k,nnew,ibio))) THEN
+                   print *, "negative alert! or NaN"
+                 ENDIF
+                ENDIF
+#endif
+
+#ifdef MASKING
+              END IF
+#endif
+            END DO
+          END DO
+        END DO
+#if defined DIAGNOSTICS_BIO
+!
+!       Update DiaBio variables with local (J-slice) values
+!
+        DO ivar=1,NDbio2d
+     &                          , j                                     &
+          DO i=Istr,Iend
+            DiaBio2d(i,j,ivar)=DiaBio2d(i,j,ivar) +                     &
+     &                         DiaBio2dJ(i,ivar)
+          END DO
+        END DO
+        DO ivar=1,NDbio3d
+          DO k=1,N(ng)
+            DO i=Istr,Iend
+              DiaBio3d(i,j,k,ivar)=DiaBio3d(i,j,k,ivar) +               &
+     &                             DiaBio3dJ(i,k,ivar)
+!              IF (DiaBio3dJ(i,k,ivar) .GT. diamax1) THEN
+!                diamax1=DiaBio3d(i,j,k,ivar)
+!              END IF 
+!              IF (DiaBio3d(i,j,k,ivar) .GT. diamax2) THEN
+!                diamax2=DiaBio3d(i,j,k,ivar)
+!              END IF 
+            END DO
+          END DO
+!          print *, ivar,': max(diaJ)=',diamax1
+!          print *, ivar,': max(dia3d)=',diamax2
+        END DO
+#endif
+#if defined NEMURO_CHL && defined LOGDIAGNOSTICS_NEM_CHL && ! defined NEMURO_CHL_STATICRATIO
+        IF (j==LOGDIAGNOSTICS_NEM_CHL_J.and.LOGDIAGNOSTICS_NEM_CHL_I.ge.Istr.and.LOGDIAGNOSTICS_NEM_CHL_I.le.Iend) THEN
+          i=LOGDIAGNOSTICS_NEM_CHL_I
+          k=LOGDIAGNOSTICS_NEM_CHL_K
+          write(*,'(a30,f19.12)') 'final ChlS = ',Bio(i,k,iChlS)
+          write(*,'(a30,f19.12)') 'final ChlL = ',Bio(i,k,iChlL)
+          write(*,'(a30,f19.12)') 'final ChlS below = ',Bio(i,k-1,iChlS)
+          write(*,'(a30,f19.12)') 'final ChlL below = ',Bio(i,k-1,iChlL)
+        END IF
+#endif
+
+      END DO J_LOOP
+      
+      RETURN
+      END SUBROUTINE nemuro_restruct_tile
+
+      END MODULE biology_mod
+      

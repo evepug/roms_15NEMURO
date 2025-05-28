@@ -1,0 +1,2749 @@
+# if ! defined NEMURO_CARB_MAXITER
+#  if defined NEMURO_CARB_NEWTON
+#   define NEMURO_CARB_MAXITER 10
+#  else
+#   define NEMURO_CARB_MAXITER 30
+#  endif
+# endif
+
+      SUBROUTINE pCO2_water_old (DoNewton,                              &
+# ifdef MASKING
+     &                       maskik,                                    &
+# endif
+     &                       tempik, saltik, ticik, talkik,             &
+     &                       po4ik, sio3ik, phik, pco2ik)
+!
+!***********************************************************************
+!                                                                      !
+!  This routine computes equilibrium partial pressure of CO2 (pCO2)    !
+!  in the surface seawater.                                            !
+!                                                                      !
+!  On Input:                                                           !
+!                                                                      !
+!     Istr       Starting tile index in the I-direction.               !
+!     Iend       Ending   tile index in the I-direction.               !
+!     LBi        I-dimension lower bound.                              !
+!     UBi        I-dimension upper bound.                              !
+!     LBj        J-dimension lower bound.                              !
+!     UBj        J-dimension upper bound.                              !
+!     IminS      I-dimension lower bound for private arrays.           !
+!     ImaxS      I-dimension upper bound for private arrays.           !
+!     j          j-pipelined index.                                    !
+!     DoNewton   Iteration solver:                                     !
+!                  [0] Bracket and bisection.                          !
+!                  [1] Newton-Raphson method.                          !
+!     rmask      Land/Sea masking.                                     !
+!     T          Surface temperature (Celsius).                        !
+!     S          Surface salinity (PSS).                               !
+!     TIC        Total inorganic carbon (millimol/m3).                 !
+!     TAlk       Total alkalinity (milli-equivalents/m3).              !
+!     PO4        Inorganic phosphate (millimol/m3).                    !
+!     SiO3       Inorganic silicate (millimol/m3).                     !
+!     pH         Best pH guess.                                        !
+!                                                                      !
+!  On Output:                                                          !
+!                                                                      !
+!     pCO2       partial pressure of CO2 (ppmv).                       !
+!                                                                      !
+!  Check Value:  (T=24, S=36.6, TIC=2040, TAlk=2390, PO4=0,            !
+!                 SiO3=0, pH=8)                                        !
+!                                                                      !
+!                pcO2=0.35074945E+03 ppmv  (DoNewton=0)                !
+!                pCO2=0.35073560E+03 ppmv  (DoNewton=1)                !
+!                                                                      !
+!  This subroutine was adapted by Mick Follows (Oct 1999) from OCMIP2  !
+!  code CO2CALC. Modified for ROMS by Hernan Arango (Nov 2003).        !
+!                                                                      !
+!***********************************************************************
+!
+      !integer, parameter :: r8 = selected_real_kind(12,300)
+!
+!  Imported variable declarations.
+!
+      integer,  intent(in) :: DoNewton
+!
+#  ifdef MASKING
+      real(r8), intent(in) :: maskik
+#  endif
+      real(r8), intent(in) :: tempik
+      real(r8), intent(in) :: saltik
+      real(r8), intent(in) :: ticik
+      real(r8), intent(in) :: talkik
+      real(r8), intent(inout) :: phik
+      real(r8), intent(out) :: pco2ik
+      real(r8), intent(in) :: po4ik
+      real(r8), intent(in) :: sio3ik
+!
+!  Local variable declarations.
+!
+      integer, parameter :: InewtonMax = 10
+      integer, parameter :: IbrackMax = 30
+
+      integer :: Hstep, Ibrack, Inewton, i
+
+      real(r8) :: Tk, centiTk, invTk, logTk
+      real(r8) :: SO4, scl, sqrtS, sqrtSO4
+      real(r8) :: alk, dic, phos, sili
+      real(r8) :: borate, sulfate, fluoride
+      real(r8) :: ff, K1, K2, K1p, K2p, K3p, Kb, Kf, Ks, Ksi, Kw
+      real(r8) :: K12, K12p, K123p, invKb, invKs, invKsi
+      real(r8) :: A, A2, B, B2, C, dA, dB
+      real(r8) :: df, fn, fni(3), ftest
+      real(r8) :: deltaX, invX, invX2, X, X2, X3
+      real(r8) :: pH_guess, pH_hi, pH_lo
+      real(r8) :: X_guess, X_hi, X_lo, X_mid
+      real(r8) :: CO2star, Htotal, Htotal2
+!
+!=======================================================================
+!  Determine coefficients for surface carbon chemisty.  If land/sea
+!  masking, compute only on water points.
+!=======================================================================
+!
+# ifdef MASKING
+      IF (maskik.gt.0.0_r8) THEN
+# endif
+        Tk=tempik+273.15_r8
+        centiTk=0.01_r8*Tk
+        invTk=1.0_r8/Tk
+        logTk=LOG(Tk)
+        sqrtS=SQRT(saltik)
+        SO4=19.924_r8*saltik/(1000.0_r8-1.005_r8*saltik)
+        sqrtSO4=SQRT(SO4)
+        scl=saltik/1.80655_r8
+
+        alk=talkik*0.000001_r8
+        dic=ticik*0.000001_r8
+        phos=po4ik*0.000001_r8
+        sili=sio3ik*0.000001_r8
+!
+!-----------------------------------------------------------------------
+!  Correction term for non-ideality, ff=k0*(1-pH2O). Equation 13 with
+!  table 6 values from Weiss and Price (1980, Mar. Chem., 8, 347-359).
+!-----------------------------------------------------------------------
+!
+        ff=EXP(-162.8301_r8+                                            &
+     &         218.2968_r8/centiTk+                                     &
+     &         LOG(centiTk)*90.9241_r8-                                 &
+     &         centiTk*centiTk*1.47696_r8+                              &
+     &         saltik*(0.025695_r8-                                     &
+     &               centiTk*(0.025225_r8-                              &
+     &                        centiTk*0.0049867_r8)))
+!
+!-----------------------------------------------------------------------
+!  Compute first (K1) and second (K2) dissociation constant of carboinic
+!  acid:
+!
+!           K1 = [H][HCO3]/[H2CO3]
+!           K2 = [H][CO3]/[HCO3]
+!
+!  From Millero (1995; page 664) using Mehrbach et al. (1973) data on
+!  seawater scale.
+!-----------------------------------------------------------------------
+!
+        K1=10.0_r8**(62.008_r8-                                         &
+     &               invTk*3670.7_r8-                                   &
+     &               logTk*9.7944_r8+                                   &
+     &               saltik*(0.0118_r8-                                 &
+     &                     saltik*0.000116_r8))
+        K2=10.0_r8**(-4.777_r8-                                         &
+     &               invTk*1394.7_r8+                                   &
+     &               saltik*(0.0184_r8-                                 &
+     &                     saltik*0.000118_r8))
+!
+!-----------------------------------------------------------------------
+!  Compute dissociation constant of boric acid, Kb=[H][BO2]/[HBO2].
+!  From Millero (1995; page 669) using data from Dickson (1990).
+!-----------------------------------------------------------------------
+!
+        Kb=EXP(-invTk*(8966.90_r8+                                      &
+     &                 sqrtS*(2890.53_r8+                               &
+     &                        sqrtS*(77.942_r8-                         &
+     &                               sqrtS*(1.728_r8-                   &
+     &                                      sqrtS*0.0996_r8))))-        &
+     &         logTk*(24.4344_r8+                                       &
+     &                sqrtS*(25.085_r8+                                 &
+     &                       sqrtS*0.2474_r8))+                         &
+     &         Tk*(sqrtS*0.053105_r8)+                                  &
+     &         148.0248_r8+                                             &
+     &         sqrtS*(137.1942_r8+                                      &
+     &                sqrtS*1.62142_r8))
+      !if (Kb.eq.0.0_r8) Kb=0.000001_r8 ! TODO Kb can become zero 
+!
+!-----------------------------------------------------------------------
+!  Compute first (K1p), second (K2p), and third (K3p) dissociation
+!  constant of phosphoric acid:
+!
+!           K1p = [H][H2PO4]/[H3PO4]
+!           K2p = [H][HPO4]/[H2PO4]
+!           K3p = [H][PO4]/[HPO4]
+!
+!  From DOE (1994) equations 7.2.20, 7.2.23, and 7.2.26, respectively.
+!  With footnote using data from Millero (1974).
+!-----------------------------------------------------------------------
+!
+        K1p=EXP(115.525_r8-                                             &
+     &          invTk*4576.752_r8-                                      &
+     &          logTk*18.453_r8+                                        &
+     &          sqrtS*(0.69171_r8-invTk*106.736_r8)-                    &
+     &          saltik*(0.01844_r8+invTk*0.65643_r8))
+        K2p=EXP(172.0883_r8-                                            &
+     &          invTk*8814.715_r8-                                      &
+     &          logTk*27.927_r8+                                        &
+     &          sqrtS*(1.3566_r8-invTk*160.340_r8)-                     &
+     &          saltik*(0.05778_r8-invTk*0.37335_r8))
+        K3p=EXP(-18.141_r8-                                             &
+     &          invTk*3070.75_r8+                                       &
+     &          sqrtS*(2.81197_r8+invTk*17.27039_r8)-                   &
+     &          saltik*(0.09984_r8+invTk*44.99486_r8))
+!
+!-----------------------------------------------------------------------
+!  Compute dissociation constant of silica, Ksi=[H][SiO(OH)3]/[Si(OH)4].
+!  From Millero (1995; page 671) using data from Yao and Millero (1995).
+!-----------------------------------------------------------------------
+!
+        Ksi=EXP(117.385_r8-                                             &
+     &          invTk*8904.2_r8-                                        &
+     &          logTk*19.334_r8+                                        &
+     &          sqrtSO4*(3.5913_r8-invTk*458.79_r8)-                    &
+     &          SO4*(1.5998_r8-invTk*188.74_r8-                         &
+     &               SO4*(0.07871_r8-invTk*12.1652_r8))+                &
+     &          LOG(1.0_r8-0.001005_r8*saltik))
+!
+!-----------------------------------------------------------------------
+!  Compute ion product of whater, Kw = [H][OH].
+!  From Millero (1995; page 670) using composite data.
+!-----------------------------------------------------------------------
+!
+        Kw=EXP(148.9652_r8-                                             &
+     &         invTk*13847.26_r8-                                       &
+     &         logTk*23.6521_r8-                                        &
+     &         sqrtS*(5.977_r8-                                         &
+     &                invTk*118.67_r8-                                  &
+     &                logTk*1.0495_r8)-                                 &
+     &         saltik*0.01615_r8)
+!
+!------------------------------------------------------------------------
+!  Compute salinity constant of hydrogen sulfate, Ks = [H][SO4]/[HSO4].
+!  From Dickson (1990, J. chem. Thermodynamics 22, 113)
+!------------------------------------------------------------------------
+!
+        Ks=EXP(141.328_r8-                                              &
+     &         invTk*4276.1_r8-                                         &
+     &         logTk*23.093_r8+                                         &
+     &         sqrtSO4*(324.57_r8-invTk*13856.0_r8-logTk*47.986_r8-     &
+     &                  SO4*invTk*2698.0_r8)-                           &
+     &         SO4*(771.54_r8-invTk*35474.0_r8-logTk*114.723_r8-        &
+     &              SO4*invTk*1776.0_r8)+                               &
+     &         LOG(1.0_r8-0.001005_r8*saltik))
+!
+!-----------------------------------------------------------------------
+!  Compute stability constant of hydrogen fluorid, Kf = [H][F]/[HF].
+!  From Dickson and Riley (1979) -- change pH scale to total.
+!-----------------------------------------------------------------------
+!
+        Kf=EXP(-12.641_r8+                                              &
+     &         invTk*1590.2_r8+                                         &
+     &         sqrtSO4*1.525_r8+                                        &
+     &         LOG(1.0_r8-0.001005_r8*saltik)+                          &
+     &         LOG(1.0_r8+0.1400_r8*scl/(96.062_r8*Ks)))
+!
+!-----------------------------------------------------------------------
+! Calculate concentrations for borate (Uppstrom, 1974), sulfate (Morris
+! and Riley, 1966), and fluoride (Riley, 1965).
+!-----------------------------------------------------------------------
+!
+        borate=0.000232_r8*scl/10.811_r8
+        sulfate=0.14_r8*scl/96.062_r8
+        fluoride=0.000067_r8*scl/18.9984_r8
+!
+!=======================================================================
+!  Iteratively solver for computing hydrogen ions [H+] using either:
+!
+!    (1) Newton-Raphson method with fixed number of iterations,
+!        use previous [H+] as first guess, or
+!    (2) bracket and bisection
+!=======================================================================
+!
+!  Set first guess and brackets for [H+] solvers.
+!
+        pH_guess=phik            ! Newton-Raphson
+        pH_hi=10.0_r8            ! high bracket/bisection
+        pH_lo=5.0_r8             ! low bracket/bisection
+!
+!  Convert to [H+].
+!
+        X_guess=10.0_r8**(-pH_guess)
+        X_lo=10.0_r8**(-pH_hi)
+        X_hi=10.0_r8**(-pH_lo)
+        X_mid=0.5_r8*(X_lo+X_hi)
+!
+!-----------------------------------------------------------------------
+!  Newton-Raphson method.
+!-----------------------------------------------------------------------
+!
+        IF (DoNewton.eq.1) THEN
+          X=X_guess
+          K12=K1*K2
+          K12p=K1p*K2p
+          K123p=K12p*K3p
+          invKb=1.0_r8/Kb
+          invKs=1.0_r8/Ks
+          invKsi=1.0_r8/Ksi
+!
+          DO Inewton=1,InewtonMax
+!
+!  Set some common combinations of parameters used in the iterative [H+]
+!  solver.
+!
+            X2=X*X
+            X3=X2*X
+            invX=1.0_r8/X
+            invX2=1.0_r8/X2
+
+            A=X*(K12p+X*(K1p+X))
+            B=X*(K1+X)+K12
+            C=1.0_r8/(1.0_r8+sulfate*invKs)
+
+            A2=A*A
+            B2=B*B
+            dA=X*(2.0_r8*K1p+3.0_r8*X)+K12p
+            dB=2.0_r8*X+K1
+!
+!  Evaluate f([H+]):
+!
+!     fn=HCO3+CO3+borate+OH+HPO4+2*PO4+H3PO4+silicate+Hfree+HSO4+HF-TALK
+!
+            fn=dic*K1*(X+2.0_r8*K2)/B+                                  &
+     &         borate/(1.0_r8+X*invKb)+                                 &
+     &         Kw*invX+                                                 &
+     &         phos*(K12p*X+2.0_r8*K123p-X3)/A+                         &
+     &         sili/(1.0_r8+X*invKsi)-                                  &
+     &         X*C-                                                     &
+     &         sulfate/(1.0_r8+Ks*invX*C)-                              &
+     &         fluoride/(1.0_r8+Kf*invX)-                               &
+     &         alk
+!
+!  Evaluate derivative, f(prime)([H+]):
+!
+!     df= d(fn)/d(X)
+!
+            df=dic*K1*(B-dB*(X+2.0_r8*K2))/B2-                          &
+     &         borate/(invKb*(1.0_r8+X*invKb)**2)-                      &
+     &         Kw*invX2+                                                &
+     &         phos*(A*(K12p-3.0_r8*X2)-dA*(K12p*X+2.0_r8*K123p-X3))/A2-&
+     &         sili/(invKsi*(1.0_r8+X*invKsi)**2)+                      &
+     &         C+                                                       &
+     &         sulfate*Ks*C*invX2/((1.0_r8+Ks*invX*C)**2)+              &
+     &         fluoride*Kf*invX2/((1.0_r8+Kf*invX)**2)
+!
+!  Evaluate increment in [H+].
+!
+            deltaX=-fn/df
+!
+!  Update estimate of [H+].
+!
+            X=X+deltaX
+          END DO
+!
+!-----------------------------------------------------------------------
+!  Bracket and bisection method.
+!-----------------------------------------------------------------------
+!
+        ELSE
+!
+!  If first step, use Bracket and Bisection method with fixed, large
+!  number of iterations
+!
+          K12=K1*K2
+          K12p=K1p*K2p
+          K123p=K12p*K3p
+          invKb=1.0_r8/Kb
+          invKs=1.0_r8/Ks
+          invKsi=1.0_r8/Ksi
+!
+          BRACK_IT: DO Ibrack=1,IbrackMax
+            DO Hstep=1,3
+              IF (Hstep.eq.1) X=X_hi
+              IF (Hstep.eq.2) X=X_lo
+              IF (Hstep.eq.3) X=X_mid
+!
+!  Set some common combinations of parameters used in the iterative [H+]
+!  solver.
+!
+              X2=X*X
+              X3=X2*X
+              invX=1.0_r8/X
+
+              A=X*(K12p+X*(K1p+X))+K123p
+              B=X*(K1+X)+K12
+              C=1.0_r8/(1.0_r8+sulfate*invKs)
+
+              A2=A*A
+              B2=B*B
+              dA=X*(K1p*2.0_r8+3.0_r8*X2)+K12p
+              dB=2.0_r8*X+K1
+!
+!  Evaluate f([H+]) for bracketing and mid-value cases.
+!
+              fni(Hstep)=dic*(K1*X+2.0_r8*K12)/B+                       &
+     &                   borate/(1.0_r8+X*invKb)+                       &
+     &                   Kw*invX+                                       &
+     &                   phos*(K12p*X+2.0_r8*K123p-X3)/A+               &
+     &                   sili/(1.0_r8+X*invKsi)-                        &
+     &                   X*C-                                           &
+     &                   sulfate/(1.0_r8+Ks*invX*C)-                    &
+     &                   fluoride/(1.0_r8+Kf*invX)-                     &
+     &                   alk
+            END DO
+!
+!  Now, bracket solution within two of three.
+!
+            IF (fni(3).eq.0.0_r8) THEN
+              EXIT BRACK_IT
+            ELSE
+              ftest=fni(1)/fni(3)
+              IF (ftest.gt.0.0_r8) THEN
+                X_hi=X_mid
+              ELSE
+                X_lo=X_mid
+              END IF
+              X_mid=0.5_r8*(X_lo+X_hi)
+            END IF
+          END DO BRACK_IT
+!
+! Last iteration gives value.
+!
+          X=X_mid
+        END IF
+!
+!-----------------------------------------------------------------------
+!  Determine pCO2.
+!-----------------------------------------------------------------------
+!
+!  Total Hydrogen ion concentration, Htotal = [H+].
+!
+        Htotal=X
+        Htotal2=Htotal*Htotal
+!
+!  Calculate [CO2*] (mole/m3) as defined in DOE Methods Handbook 1994
+!  Version 2, ORNL/CDIAC-74, Dickson and Goyet, Eds. (Chapter 2,
+!  page 10, Eq A.49).
+!
+        CO2star=dic*Htotal2/(Htotal2+K1*Htotal+K1*K2)
+!
+!  Save pH is used again outside this routine.
+!
+        phik=-LOG10(Htotal)
+!
+!  Add two output arguments for storing pCO2surf.
+!
+        pco2ik=CO2star*1000000.0_r8/ff
+!
+# ifdef MASKING
+      ELSE
+        phik=0.0_r8
+        pco2ik=0.0_r8
+      END IF
+# endif
+!
+      RETURN
+      END SUBROUTINE pCO2_water_old
+
+
+      SUBROUTINE pCO2_water(                                            &
+# ifdef MASKING
+     &                      maskik,                                     &
+# endif
+     &                      tempik, saltik, ticik, talkik,              &
+     &                      po4ik, sio3ik, phik, pco2ik)
+!
+!***********************************************************************
+!                                                                      !
+!  This routine computes equilibrium partial pressure of CO2 (pCO2)    !
+!  in the surface seawater.                                            !
+!                                                                      !
+!  On Input:                                                           !
+!                                                                      !
+!     maskik     Land/Sea masking.                                     !
+!     tempik     Surface temperature (Celsius).                        !
+!     saltik     Surface salinity (PSS).                               !
+!     ticik      Total inorganic carbon (millimol/m3).                 !
+!     talkik     Total alkalinity (milli-equivalents/m3).              !
+!     po4ik      Inorganic phosphate (millimol/m3).                    !
+!     sio3ik     Inorganic silicate (millimol/m3).                     !
+!                                                                      !
+!  On Output:                                                          !
+!                                                                      !
+!     phik       pH.                                                   !
+!     pco2ik     partial pressure of CO2 (ppmv).                       !
+!                                                                      !
+!  Check Value:  (tempik=24, saltik=36.6, ticik=2040, talkik=2390,     !
+!                 po4ik=0, sio3ik=0)                                   !
+!                                                                      !
+!                pcO2=0.35074945E+03 ppmv  (DoNewton=0)                !
+!                pCO2=0.35073560E+03 ppmv  (DoNewton=1)                !
+!                                                                      !
+!  This subroutine was adapted by Mick Follows (Oct 1999) from OCMIP2  !
+!  code CO2CALC. Modified for ROMS by Hernan Arango (Nov 2003).        !
+!  Performance improvements and code streamlining by Jann Paul Mattern !
+!  (Jul 2015).                                                         !
+!                                                                      !
+!***********************************************************************
+!
+
+!
+!  Imported variable declarations.
+!
+#  ifdef MASKING
+      real(r8), intent(in) :: maskik
+#  endif
+      real(r8), intent(in) :: tempik
+      real(r8), intent(in) :: saltik
+      real(r8), intent(in) :: ticik
+      real(r8), intent(in) :: talkik
+# if defined NEMURO_CARB_NEWTON
+      real(r8), intent(inout) :: phik
+# else
+      real(r8), intent(out) :: phik
+# endif
+      real(r8), intent(out) :: pco2ik
+      real(r8), intent(in) :: po4ik
+      real(r8), intent(in) :: sio3ik
+!
+!  Local variable declarations.
+!
+# if defined NEMURO_CARB_NEWTON
+      integer, parameter :: InewtonMax = NEMURO_CARB_MAXITER
+      integer :: Inewton
+# else
+      integer, parameter :: IbrackMax = NEMURO_CARB_MAXITER
+      integer :: Ibrack
+# endif
+
+# if defined NEMURO_CARB_NEWTON
+      real(r8) :: df, fn
+      real(r8) :: pH_guess, H_guess
+      real(r8) :: deltaH, invH, invH2, H, H2, H3
+      real(r8) :: A, A2, B, B2, C, dA, dB
+# else
+      real(r8) :: ftest
+      real(r8) :: H_hi, H_lo, H_mid
+      real(r8) :: f_hi, f_mid
+      real(r8) :: H, H2
+# endif
+      real(r8) :: Tk, centiTk, invTk, logTk
+      real(r8) :: SO4, scl, sqrtS, sqrtSO4
+      real(r8) :: alk, dic, phos, sili
+      real(r8) :: borate, sulfate, fluoride
+      real(r8) :: ff, K1, K2, K1p, K2p, K3p, Kb, Kf, Ks, Ksi, Kw
+      real(r8) :: K12, K12p, K123p, invKb, invKs, invKsi
+      real(r8) :: CO2star
+!
+!=======================================================================
+!  Determine coefficients for surface carbon chemisty.  If land/sea
+!  masking, compute only on water points.
+!=======================================================================
+!
+# ifdef MASKING
+      IF (maskik.le.0.0_r8) THEN
+        phik=0.0_r8
+        pco2ik=0.0_r8
+        RETURN
+      END IF
+# endif
+      Tk=tempik+273.15_r8
+      centiTk=0.01_r8*Tk
+      invTk=1.0_r8/Tk
+      logTk=LOG(Tk)
+      sqrtS=SQRT(saltik)
+      SO4=19.924_r8*saltik/(1000.0_r8-1.005_r8*saltik)
+      sqrtSO4=SQRT(SO4)
+      scl=saltik/1.80655_r8
+
+      alk=talkik*0.000001_r8
+      dic=ticik*0.000001_r8
+      phos=po4ik*0.000001_r8
+      sili=sio3ik*0.000001_r8
+!
+!-----------------------------------------------------------------------
+!  Correction term for non-ideality, ff=k0*(1-pH2O). Equation 13 with
+!  table 6 values from Weiss and Price (1980, Mar. Chem., 8, 347-359).
+!-----------------------------------------------------------------------
+!
+      ff=EXP(-162.8301_r8+                                              &
+     &    218.2968_r8/centiTk+                                          &
+     &    LOG(centiTk)*90.9241_r8-                                      &
+     &    centiTk*centiTk*1.47696_r8+                                   &
+     &    saltik*(0.025695_r8-                                          &
+     &    centiTk*(0.025225_r8-                                         &
+     &    centiTk*0.0049867_r8)))
+!
+!-----------------------------------------------------------------------
+!  Compute first (K1) and second (K2) dissociation constant of carboinic
+!  acid:
+!
+!           K1 = [H][HCO3]/[H2CO3]
+!           K2 = [H][CO3]/[HCO3]
+!
+!  From Millero (1995; page 664) using Mehrbach et al. (1973) data on
+!  seawater scale.
+!-----------------------------------------------------------------------
+!
+      K1=10.0_r8**(62.008_r8-invTk*3670.7_r8-logTk*9.7944_r8+           &
+     &    saltik*(0.0118_r8-saltik*0.000116_r8))
+      K2=10.0_r8**(-4.777_r8-invTk*1394.7_r8+                           &
+     &    saltik*(0.0184_r8-saltik*0.000118_r8))
+!
+!-----------------------------------------------------------------------
+!  Compute dissociation constant of boric acid, Kb=[H][BO2]/[HBO2].
+!  From Millero (1995; page 669) using data from Dickson (1990).
+!-----------------------------------------------------------------------
+!
+      Kb=EXP(-invTk*(8966.90_r8+                                        &
+     &               sqrtS*(2890.53_r8+                                 &
+     &                      sqrtS*(77.942_r8-                           &
+     &                             sqrtS*(1.728_r8-                     &
+     &                                    sqrtS*0.0996_r8))))-          &
+     &       logTk*(24.4344_r8+                                         &
+     &              sqrtS*(25.085_r8+                                   &
+     &                     sqrtS*0.2474_r8))+                           &
+     &       Tk*(sqrtS*0.053105_r8)+                                    &
+     &       148.0248_r8+                                               &
+     &       sqrtS*(137.1942_r8+                                        &
+     &              sqrtS*1.62142_r8))
+      !if (Kb.eq.0.0_r8) Kb=0.000001_r8 ! TODO Kb can become zero 
+!
+!-----------------------------------------------------------------------
+!  Compute first (K1p), second (K2p), and third (K3p) dissociation
+!  constant of phosphoric acid:
+!
+!           K1p = [H][H2PO4]/[H3PO4]
+!           K2p = [H][HPO4]/[H2PO4]
+!           K3p = [H][PO4]/[HPO4]
+!
+!  From DOE (1994) equations 7.2.20, 7.2.23, and 7.2.26, respectively.
+!  With footnote using data from Millero (1974).
+!-----------------------------------------------------------------------
+!
+      K1p=EXP(115.525_r8-                                               &
+     &        invTk*4576.752_r8-                                        &
+     &        logTk*18.453_r8+                                          &
+     &        sqrtS*(0.69171_r8-invTk*106.736_r8)-                      &
+     &        saltik*(0.01844_r8+invTk*0.65643_r8))
+      K2p=EXP(172.0883_r8-                                              &
+     &        invTk*8814.715_r8-                                        &
+     &        logTk*27.927_r8+                                          &
+     &        sqrtS*(1.3566_r8-invTk*160.340_r8)-                       &
+     &        saltik*(0.05778_r8-invTk*0.37335_r8))
+      K3p=EXP(-18.141_r8-                                               &
+     &        invTk*3070.75_r8+                                         &
+     &        sqrtS*(2.81197_r8+invTk*17.27039_r8)-                     &
+     &        saltik*(0.09984_r8+invTk*44.99486_r8))
+!
+!-----------------------------------------------------------------------
+!  Compute dissociation constant of silica, Ksi=[H][SiO(OH)3]/[Si(OH)4].
+!  From Millero (1995; page 671) using data from Yao and Millero (1995).
+!-----------------------------------------------------------------------
+!
+      Ksi=EXP(117.385_r8-                                               &
+     &        invTk*8904.2_r8-                                          &
+     &        logTk*19.334_r8+                                          &
+     &        sqrtSO4*(3.5913_r8-invTk*458.79_r8)-                      &
+     &        SO4*(1.5998_r8-invTk*188.74_r8-                           &
+     &             SO4*(0.07871_r8-invTk*12.1652_r8))+                  &
+     &        LOG(1.0_r8-0.001005_r8*saltik))
+!
+!-----------------------------------------------------------------------
+!  Compute ion product of whater, Kw = [H][OH].
+!  From Millero (1995; page 670) using composite data.
+!-----------------------------------------------------------------------
+!
+      Kw=EXP(148.9652_r8-                                               &
+     &       invTk*13847.26_r8-                                         &
+     &       logTk*23.6521_r8-                                          &
+     &       sqrtS*(5.977_r8-                                           &
+     &              invTk*118.67_r8-                                    &
+     &              logTk*1.0495_r8)-                                   &
+     &       saltik*0.01615_r8)
+!
+!------------------------------------------------------------------------
+!  Compute salinity constant of hydrogen sulfate, Ks = [H][SO4]/[HSO4].
+!  From Dickson (1990, J. chem. Thermodynamics 22, 113)
+!------------------------------------------------------------------------
+!
+      Ks=EXP(141.328_r8-                                                &
+     &       invTk*4276.1_r8-                                           &
+     &       logTk*23.093_r8+                                           &
+     &       sqrtSO4*(324.57_r8-invTk*13856.0_r8-logTk*47.986_r8-       &
+     &                SO4*invTk*2698.0_r8)-                             &
+     &       SO4*(771.54_r8-invTk*35474.0_r8-logTk*114.723_r8-          &
+     &            SO4*invTk*1776.0_r8)+                                 &
+     &       LOG(1.0_r8-0.001005_r8*saltik))
+!
+!-----------------------------------------------------------------------
+!  Compute stability constant of hydrogen fluorid, Kf = [H][F]/[HF].
+!  From Dickson and Riley (1979) -- change pH scale to total.
+!-----------------------------------------------------------------------
+!
+      Kf=EXP(-12.641_r8+                                                &
+     &       invTk*1590.2_r8+                                           &
+     &       sqrtSO4*1.525_r8+                                          &
+     &       LOG(1.0_r8-0.001005_r8*saltik)+                            &
+     &       LOG(1.0_r8+0.1400_r8*scl/(96.062_r8*Ks)))
+!
+!-----------------------------------------------------------------------
+! Calculate concentrations for borate (Uppstrom, 1974), sulfate (Morris
+! and Riley, 1966), and fluoride (Riley, 1965).
+!-----------------------------------------------------------------------
+!
+      borate=0.000232_r8*scl/10.811_r8
+      sulfate=0.14_r8*scl/96.062_r8
+      fluoride=0.000067_r8*scl/18.9984_r8
+!
+!=======================================================================
+!  Iterative solver for computing hydrogen ions [H+] using:
+!
+# if defined NEMURO_CARB_NEWTON
+!        Newton-Raphson method with fixed number of iterations,
+!        use previous [H+] as first guess
+!=======================================================================
+!
+!  Set first guess for [H+] solvers.
+!
+      pH_guess=phik            ! Newton-Raphson
+      pH_hi=10.0_r8            ! high bracket/bisection
+      pH_lo=5.0_r8             ! low bracket/bisection
+!
+!  Convert to [H+].
+!
+      H_guess=10.0_r8**(-pH_guess)
+      H_lo=10.0_r8**(-pH_hi)
+      H_hi=10.0_r8**(-pH_lo)
+      H_mid=0.5_r8*(H_lo+H_hi)
+!
+!-----------------------------------------------------------------------
+!  Newton-Raphson method.
+!-----------------------------------------------------------------------
+!
+      H=H_guess
+      K12=K1*K2
+      K12p=K1p*K2p
+      K123p=K12p*K3p
+      invKb=1.0_r8/Kb
+      invKs=1.0_r8/Ks
+      invKsi=1.0_r8/Ksi
+!
+      DO Inewton=1,InewtonMax
+!
+!  Set some common combinations of parameters used in the iterative [H+]
+!  solver.
+!
+        H2=H*H
+        H3=H2*H
+        invH=1.0_r8/H
+        invH2=1.0_r8/H2
+
+        A=H*(K12p+H*(K1p+H))
+        B=H*(K1+H)+K12
+        C=1.0_r8/(1.0_r8+sulfate*invKs)
+
+        A2=A*A
+        B2=B*B
+        dA=H*(2.0_r8*K1p+3.0_r8*H)+K12p
+        dB=2.0_r8*H+K1
+!
+!  Evaluate f([H+]):
+!
+!     fn=HCO3+CO3+borate+OH+HPO4+2*PO4+H3PO4+silicate+Hfree+HSO4+HF-TALK
+!
+        fn=dic*K1*(H+2.0_r8*K2)/B+                                      &
+     &      borate/(1.0_r8+H*invKb)+                                    &
+     &      Kw*invH+                                                    &
+     &      phos*(K12p*H+2.0_r8*K123p-H3)/A+                            &
+     &      sili/(1.0_r8+H*invKsi)-                                     &
+     &      H*C-                                                        &
+     &      sulfate/(1.0_r8+Ks*invH*C)-                                 &
+     &      fluoride/(1.0_r8+Kf*invH)-                                  &
+     &      alk
+!
+!  Evaluate derivative, f(prime)([H+]):
+!
+!     df= d(fn)/d(H)
+!
+        df=dic*K1*(B-dB*(H+2.0_r8*K2))/B2-                              &
+     &      borate/(invKb*(1.0_r8+H*invKb)**2)-                         &
+     &      Kw*invH2+                                                   &
+     &      phos*(A*(K12p-3.0_r8*H2)-dA*(K12p*H+2.0_r8*K123p-H3))/A2-   &
+     &      sili/(invKsi*(1.0_r8+H*invKsi)**2)+                         &
+     &      C+                                                          &
+     &      sulfate*Ks*C*invH2/((1.0_r8+Ks*invH*C)**2)+                 &
+     &      fluoride*Kf*invH2/((1.0_r8+Kf*invH)**2)
+!
+!  Evaluate increment in [H+].
+!
+        deltaH=-fn/df
+!
+!  Update estimate of [H+].
+!
+        H=H+deltaH
+      END DO
+# else
+!        bracket and bisection
+!=======================================================================
+!
+!-----------------------------------------------------------------------
+!  Bracket and bisection method.
+!-----------------------------------------------------------------------
+!
+      K12=K1*K2
+      K12p=K1p*K2p
+      K123p=K12p*K3p
+      invKb=1.0_r8/Kb
+      invKs=1.0_r8/Ks
+      invKsi=1.0_r8/Ksi
+!
+!  Set brackets for [H+] solvers.
+!
+!     H_lo=10.0_r8**(-pH_hi) with high bracket pH_hi=10.0
+!
+      H_lo=10.0_r8**(-10.0_r8)
+!
+!     H_hi=10.0_r8**(-pH_lo) with low bracket pH_lo=5.0
+!
+      H_hi=10.0_r8**(-5.0_r8)
+
+      H_mid=0.5_r8*(H_lo+H_hi)
+!
+!
+      f_hi=h_total(H_hi, K1, K1p, K12, K12p, K123p,                     &
+     &    Kf, Ks, Kw, invKb, invKs, invKsi,                             &
+     &    alk, borate, dic, fluoride, phos, sili, sulfate)
+!      f_lo=h_total(H_lo, K1, K1p, K12, K12p, K123p,                     &
+!     &    Kf, Ks, Kw, invKb, invKs, invKsi,                             &
+!     &    alk, borate, dic, fluoride, phos, sili, sulfate)
+          
+      BRACK_IT: DO Ibrack=1,IbrackMax
+!
+!  Evaluate f([H+]) for bracketing and mid-value cases.
+!
+        f_mid=h_total(H_mid, K1, K1p, K12, K12p, K123p,                 &
+     &      Kf, Ks, Kw, invKb, invKs, invKsi,                           &
+     &      alk, borate, dic, fluoride, phos, sili, sulfate)
+!
+!  Now, bracket solution within two of three.
+!
+        IF (f_mid.eq.0.0_r8) THEN
+          EXIT BRACK_IT
+        ELSE
+          ftest=f_hi/f_mid
+          IF (ftest.gt.0.0_r8) THEN
+            H_hi=H_mid
+            f_hi=f_mid
+          ELSE
+            H_lo=H_mid
+            !f_lo=f_mid
+          END IF
+          H_mid=0.5_r8*(H_lo+H_hi)
+        END IF
+      END DO BRACK_IT
+!
+! Last iteration gives value.
+!
+      H=H_mid
+# endif
+!
+!-----------------------------------------------------------------------
+!  Determine pCO2.
+!-----------------------------------------------------------------------
+!
+!  Total Hydrogen ion concentration, H = [H+].
+!
+      H2=H*H
+!
+!  Calculate [CO2*] (mole/m3) as defined in DOE Methods Handbook 1994
+!  Version 2, ORNL/CDIAC-74, Dickson and Goyet, Eds. (Chapter 2,
+!  page 10, Eq A.49).
+!
+      CO2star=dic*H2/(H2+K1*H+K1*K2)
+!
+!  Save pH is used again outside this routine.
+!
+      phik=-LOG10(H)
+!
+!  Add two output arguments for storing pCO2surf.
+!
+      pco2ik=CO2star*1000000.0_r8/ff
+!
+!
+      RETURN
+      END SUBROUTINE pCO2_water
+
+      SUBROUTINE tl_pCO2_water(                                         &
+# ifdef MASKING
+     &                         maskik,                                  &
+# endif
+     &                         tempik, tl_tempik,                       &
+     &                         saltik, tl_saltik,                       &
+     &                         ticik,  tl_ticik,                        &
+     &                         talkik, tl_talkik,                       &
+     &                         po4ik,  tl_po4ik,                        &
+     &                         sio3ik, tl_sio3ik,                       &
+     &                         phik,   tl_phik,                         &
+     &                         pco2ik, tl_pco2ik)
+!
+!***********************************************************************
+!                                                                      !
+!  This routine computes equilibrium partial pressure of CO2 (pCO2)    !
+!  in the surface seawater.                                            !
+!                                                                      !
+!  On Input:                                                           !
+!                                                                      !
+!     maskik     Land/Sea masking.                                     !
+!     tempik     Surface temperature (Celsius).                        !
+!     saltik     Surface salinity (PSS).                               !
+!     ticik      Total inorganic carbon (millimol/m3).                 !
+!     talkik     Total alkalinity (milli-equivalents/m3).              !
+!     po4ik      Inorganic phosphate (millimol/m3).                    !
+!     sio3ik     Inorganic silicate (millimol/m3).                     !
+!                                                                      !
+!  On Output:                                                          !
+!                                                                      !
+!     phik       pH.                                                   !
+!     pco2ik     partial pressure of CO2 (ppmv).                       !
+!                                                                      !
+!  Check Value:  (tempik=24, saltik=36.6, ticik=2040, talkik=2390,     !
+!                 po4ik=0, sio3ik=0)                                   !
+!                                                                      !
+!                pcO2=0.35074945E+03 ppmv  (DoNewton=0)                !
+!                pCO2=0.35073560E+03 ppmv  (DoNewton=1)                !
+!                                                                      !
+!  This subroutine was adapted by Mick Follows (Oct 1999) from OCMIP2  !
+!  code CO2CALC. Modified for ROMS by Hernan Arango (Nov 2003).        !
+!  Performance improvements and code streamlining by Jann Paul Mattern !
+!  (Jul 2015).                                                         !
+!                                                                      !
+!***********************************************************************
+!
+
+!
+!  Imported variable declarations.
+!
+#  ifdef MASKING
+      real(r8), intent(in) ::  maskik
+#  endif
+      real(r8), intent(in) ::  tempik, tl_tempik
+      real(r8), intent(in) ::  saltik, tl_saltik
+      real(r8), intent(in) ::  ticik,  tl_ticik
+      real(r8), intent(in) ::  talkik, tl_talkik
+# if defined NEMURO_CARB_NEWTON
+#  error "NEMURO_CARB_NEWTON is not tangent-linearized yet." 
+      real(r8), intent(inout) :: phik
+# else
+      real(r8), intent(out) :: phik,   tl_phik
+# endif
+      real(r8), intent(out) :: pco2ik, tl_pco2ik
+      real(r8), intent(in) ::  po4ik,  tl_po4ik
+      real(r8), intent(in) ::  sio3ik, tl_sio3ik
+!
+!  Local variable declarations.
+!
+# if defined NEMURO_CARB_NEWTON
+      integer, parameter :: InewtonMax = NEMURO_CARB_MAXITER
+      integer :: Inewton
+# else
+      integer, parameter :: IbrackMax = NEMURO_CARB_MAXITER
+      integer :: Ibrack
+# endif
+
+# if defined NEMURO_CARB_NEWTON
+      real(r8) :: df, fn
+      real(r8) :: pH_guess, H_guess
+      real(r8) :: deltaH, invH, invH2, H, H2, H3
+      real(r8) :: A, A2, B, B2, C, dA, dB
+# else
+      real(r8) :: ftest
+      real(r8) :: H_hi, H_lo, H_mid
+      real(r8) :: f_hi, f_mid
+      real(r8) :: H, H2
+      real(r8) :: tl_H, tl_H2
+# endif
+      real(r8) :: Tk, centiTk, invTk, logTk
+      real(r8) :: tl_Tk, tl_centiTk, tl_invTk, tl_logTk
+      real(r8) :: SO4, scl, sqrtS, sqrtSO4
+      real(r8) :: tl_SO4, tl_scl, tl_sqrtS, tl_sqrtSO4
+      real(r8) :: alk, dic, phos, sili
+      real(r8) :: tl_alk, tl_dic, tl_phos, tl_sili
+      real(r8) :: borate, sulfate, fluoride
+      real(r8) :: tl_borate, tl_sulfate, tl_fluoride
+      real(r8) :: ff, K1, K2, K1p, K2p, K3p
+      real(r8) :: tl_ff, tl_K1, tl_K2, tl_K1p, tl_K2p, tl_K3p
+      real(r8) :: Kb, Kf, Ks, Ksi, Kw
+      real(r8) :: tl_Kb, tl_Kf, tl_Ks, tl_Ksi, tl_Kw
+      real(r8) :: K12, K12p, K123p, invKb, invKs, invKsi
+      real(r8) :: tl_K12, tl_K12p, tl_K123p, tl_invKb,tl_invKs,tl_invKsi
+      real(r8) :: CO2star
+      real(r8) :: tl_CO2star
+!
+!  Local helper variables
+!
+      real(r8), parameter :: logof10 = LOG(10.0_r8)
+      real(r8) :: cff1, cff2, dh_totaldH
+      real(r8) :: tl_cff1, tl_cff2, tl_res
+!
+!=======================================================================
+!  Determine coefficients for surface carbon chemisty.  If land/sea
+!  masking, compute only on water points.
+!=======================================================================
+!
+# ifdef MASKING
+      IF (maskik.le.0.0_r8) THEN
+        phik=0.0_r8
+        tl_phik=0.0_r8
+        pco2ik=0.0_r8
+        tl_pco2ik=0.0_r8
+        RETURN
+      END IF
+# endif
+
+      Tk=tempik+273.15_r8
+      tl_Tk=tl_tempik
+
+      centiTk=0.01_r8*Tk
+      tl_centiTk=0.01_r8*tl_Tk
+      
+      invTk=1.0_r8/Tk
+      tl_invTk=-tl_Tk*invTk*invTk
+
+      logTk=LOG(Tk)
+      tl_logTk=tl_Tk*invTk
+
+      sqrtS=SQRT(saltik)
+      tl_sqrtS=0.5_r8*tl_saltik/sqrtS
+
+      SO4=19.924_r8*saltik/(1000.0_r8-1.005_r8*saltik)
+      tl_SO4=(19.924_r8+SO4*1.005_r8)*tl_saltik/                        &
+     &    (1000.0_r8-1.005_r8*saltik)
+
+      sqrtSO4=SQRT(SO4)
+      tl_sqrtSO4=0.5_r8*tl_SO4/sqrtSO4
+
+      scl=saltik/1.80655_r8
+      tl_scl=tl_saltik/1.80655_r8
+
+      alk=talkik*0.000001_r8
+      tl_alk=tl_talkik*0.000001_r8
+
+      dic=ticik*0.000001_r8
+      tl_dic=tl_ticik*0.000001_r8
+      
+      phos=po4ik*0.000001_r8
+      tl_phos=tl_po4ik*0.000001_r8
+      
+      sili=sio3ik*0.000001_r8
+      tl_sili=tl_sio3ik*0.000001_r8
+!
+!-----------------------------------------------------------------------
+!  Correction term for non-ideality, ff=k0*(1-pH2O). Equation 13 with
+!  table 6 values from Weiss and Price (1980, Mar. Chem., 8, 347-359).
+!-----------------------------------------------------------------------
+!
+      cff1=0.025695_r8-centiTk*(0.025225_r8-centiTk*0.0049867_r8)
+      tl_cff1=-tl_centiTk*(0.025225_r8-2.0_r8*centiTk*0.0049867_r8)
+
+      ff=EXP(-162.8301_r8+                                              &
+     &    218.2968_r8/centiTk+                                          &
+     &    LOG(centiTk)*90.9241_r8-                                      &
+     &    centiTk*centiTk*1.47696_r8+                                   &
+     &    saltik*cff1)
+      tl_ff=ff*(-218.2968_r8*tl_centiTk/(centiTk*centiTk)+              &
+     &    90.9241_r8*tl_centiTk/centiTk-                                &
+     &    2.0_r8*tl_centiTk*centiTk*1.47696_r8+                         &
+     &    tl_saltik*cff1+saltik*tl_cff1)
+!
+!-----------------------------------------------------------------------
+!  Compute first (K1) and second (K2) dissociation constant of carboinic
+!  acid:
+!
+!           K1 = [H][HCO3]/[H2CO3]
+!           K2 = [H][CO3]/[HCO3]
+!
+!  From Millero (1995; page 664) using Mehrbach et al. (1973) data on
+!  seawater scale.
+!-----------------------------------------------------------------------
+!
+      K1=10.0_r8**(62.008_r8-invTk*3670.7_r8-logTk*9.7944_r8+           &
+     &    saltik*(0.0118_r8-saltik*0.000116_r8))
+      tl_K1=logof10*K1*(-tl_invTk*3670.7_r8-tl_logTk*9.7944_r8+         &
+     &    tl_saltik*(0.0118_r8-2.0_r8*saltik*0.000116_r8))
+      
+      K2=10.0_r8**(-4.777_r8-invTk*1394.7_r8+                           &
+     &    saltik*(0.0184_r8-saltik*0.000118_r8))
+      tl_K2=logof10*K2*(-tl_invTk*1394.7_r8+                            &
+     &    tl_saltik*(0.0184_r8-2.0_r8*saltik*0.000118_r8))
+!
+!-----------------------------------------------------------------------
+!  Compute dissociation constant of boric acid, Kb=[H][BO2]/[HBO2].
+!  From Millero (1995; page 669) using data from Dickson (1990).
+!-----------------------------------------------------------------------
+!
+      cff1=8966.90_r8+sqrtS*(2890.53_r8+sqrtS*(77.942_r8-               &
+     &    sqrtS*(1.728_r8-sqrtS*0.0996_r8)))
+      tl_cff1=tl_sqrtS*(2890.53_r8+sqrtS*(2.0_r8*77.942_r8-             &
+     &    sqrtS*(3.0_r8*1.728_r8-sqrtS*0.0996_r8*4.0_r8)))
+
+      cff2=24.4344_r8+sqrtS*(25.085_r8+sqrtS*0.2474_r8)
+      tl_cff2=tl_sqrtS*(25.085_r8+2.0_r8*sqrtS*0.2474_r8)
+
+      Kb=EXP(-invTk*cff1-logTk*cff2+Tk*(sqrtS*0.053105_r8)+             &
+     &    148.0248_r8+sqrtS*(137.1942_r8+sqrtS*1.62142_r8))
+      !if (Kb.eq.0.0_r8) Kb=0.000001_r8 ! TODO Kb can become zero 
+      tl_Kb=Kb*(-tl_invTk*cff1-invTk*tl_cff1-                           &
+     &    tl_logTk*cff2-logTk*tl_cff2+                                  &
+     &    tl_Tk*(sqrtS*0.053105_r8)+Tk*(tl_sqrtS*0.053105_r8)+          &
+     &    tl_sqrtS*(137.1942_r8+2.0_r8*sqrtS*1.62142_r8))
+!
+!-----------------------------------------------------------------------
+!  Compute first (K1p), second (K2p), and third (K3p) dissociation
+!  constant of phosphoric acid:
+!
+!           K1p = [H][H2PO4]/[H3PO4]
+!           K2p = [H][HPO4]/[H2PO4]
+!           K3p = [H][PO4]/[HPO4]
+!
+!  From DOE (1994) equations 7.2.20, 7.2.23, and 7.2.26, respectively.
+!  With footnote using data from Millero (1974).
+!-----------------------------------------------------------------------
+!
+      cff1=0.69171_r8-invTk*106.736_r8
+      tl_cff1=-tl_invTk*106.736_r8
+      
+      cff2=0.01844_r8+invTk*0.65643_r8
+      tl_cff2=tl_invTk*0.65643_r8
+      
+      K1p=EXP(115.525_r8-                                               &
+     &        invTk*4576.752_r8-                                        &
+     &        logTk*18.453_r8+                                          &
+     &        sqrtS*cff1-                                               &
+     &        saltik*cff2)
+      tl_K1p=K1p*(-tl_invTk*4576.752_r8-tl_logTk*18.453_r8+             &
+     &    tl_sqrtS*cff1+sqrtS*tl_cff1-                                  &
+     &    tl_saltik*cff2-saltik*tl_cff2)
+          
+      cff1=1.3566_r8-invTk*160.340_r8
+      tl_cff1=-tl_invTk*160.340_r8
+
+      cff2=0.05778_r8-invTk*0.37335_r8
+      tl_cff2=-tl_invTk*0.37335_r8
+
+      K2p=EXP(172.0883_r8-                                              &
+     &        invTk*8814.715_r8-                                        &
+     &        logTk*27.927_r8+                                          &
+     &        sqrtS*cff1-                                               &
+     &        saltik*cff2)
+      tl_K2p=K2p*(-tl_invTk*8814.715_r8-tl_logTk*27.927_r8+             &
+     &    tl_sqrtS*cff1+sqrtS*tl_cff1-                                  &
+     &    tl_saltik*cff2-saltik*tl_cff2)
+
+      cff1=2.81197_r8+invTk*17.27039_r8
+      tl_cff1=tl_invTk*17.27039_r8
+
+      cff2=0.09984_r8+invTk*44.99486_r8
+      tl_cff2=tl_invTk*44.99486_r8
+
+      K3p=EXP(-18.141_r8-                                               &
+     &        invTk*3070.75_r8+                                         &
+     &        sqrtS*cff1-                                               &
+     &        saltik*cff2)
+      tl_K3p=K3p*(-tl_invTk*3070.75_r8+                                 &
+     &    tl_sqrtS*cff1+sqrtS*tl_cff1-                                  &
+     &    tl_saltik*cff2-saltik*tl_cff2)
+!
+!-----------------------------------------------------------------------
+!  Compute dissociation constant of silica, Ksi=[H][SiO(OH)3]/[Si(OH)4].
+!  From Millero (1995; page 671) using data from Yao and Millero (1995).
+!-----------------------------------------------------------------------
+!
+      cff1=3.5913_r8-invTk*458.79_r8
+      tl_cff1=-tl_invTk*458.79_r8
+      
+      cff2=1.5998_r8-invTk*188.74_r8-SO4*(0.07871_r8-invTk*12.1652_r8)
+      tl_cff2=-tl_invTk*188.74_r8-tl_SO4*(0.07871_r8-invTk*12.1652_r8)+ &
+     &    SO4*tl_invTk*12.1652_r8
+
+      Ksi=EXP(117.385_r8-                                               &
+     &        invTk*8904.2_r8-                                          &
+     &        logTk*19.334_r8+                                          &
+     &        sqrtSO4*cff1-                                             &
+     &        SO4*cff2+                                                 &
+     &        LOG(1.0_r8-0.001005_r8*saltik))
+      tl_Ksi=Ksi*(-tl_invTk*8904.2_r8-tl_logTk*19.334_r8+               &
+     &    tl_sqrtSO4*cff1+sqrtSO4*tl_cff1-                              &
+     &    tl_SO4*cff2-SO4*tl_cff2-                                      &
+     &    0.001005_r8*tl_saltik/(1.0_r8-0.001005_r8*saltik))
+!
+!-----------------------------------------------------------------------
+!  Compute ion product of whater, Kw = [H][OH].
+!  From Millero (1995; page 670) using composite data.
+!-----------------------------------------------------------------------
+!
+      cff1=5.977_r8-invTk*118.67_r8-logTk*1.0495_r8
+      tl_cff1=-tl_invTk*118.67_r8-tl_logTk*1.0495_r8
+
+      Kw=EXP(148.9652_r8-                                               &
+     &       invTk*13847.26_r8-                                         &
+     &       logTk*23.6521_r8-                                          &
+     &       sqrtS*cff1-                                                &
+     &       saltik*0.01615_r8)
+      tl_Kw=Kw*(-tl_invTk*13847.26_r8-tl_logTk*23.6521_r8-              &
+     &    tl_sqrtS*cff1-sqrtS*tl_cff1-                                  &
+     &    tl_saltik*0.01615_r8)
+!
+!------------------------------------------------------------------------
+!  Compute salinity constant of hydrogen sulfate, Ks = [H][SO4]/[HSO4].
+!  From Dickson (1990, J. chem. Thermodynamics 22, 113)
+!------------------------------------------------------------------------
+!
+      cff1=324.57_r8-invTk*13856.0_r8-logTk*47.986_r8-                  &
+     &    SO4*invTk*2698.0_r8
+      tl_cff1=-tl_invTk*13856.0_r8-tl_logTk*47.986_r8-                  &
+     &    (tl_SO4*invTk+SO4*tl_invTk)*2698.0_r8
+
+      cff2=771.54_r8-invTk*35474.0_r8-logTk*114.723_r8-                 &
+     &    SO4*invTk*1776.0_r8
+      tl_cff2=-tl_invTk*35474.0_r8-tl_logTk*114.723_r8-                 &
+     &    (tl_SO4*invTk+SO4*tl_invTk)*1776.0_r8
+
+      Ks=EXP(141.328_r8-invTk*4276.1_r8-logTk*23.093_r8+                &
+     &    sqrtSO4*cff1-SO4*cff2+LOG(1.0_r8-0.001005_r8*saltik))
+      tl_Ks=Ks*(-tl_invTk*4276.1_r8-tl_logTk*23.093_r8+                 &
+     &    tl_sqrtSO4*cff1+sqrtSO4*tl_cff1-                              &
+     &    tl_SO4*cff2-SO4*tl_cff2-                                      &
+     &    0.001005_r8*tl_saltik/(1.0_r8-0.001005_r8*saltik))
+!
+!-----------------------------------------------------------------------
+!  Compute stability constant of hydrogen fluorid, Kf = [H][F]/[HF].
+!  From Dickson and Riley (1979) -- change pH scale to total.
+!-----------------------------------------------------------------------
+!
+      cff1=0.1400_r8*scl/(96.062_r8*Ks)
+      tl_cff1=(0.1400_r8*tl_scl-cff1*96.062_r8*tl_Ks)/(96.062_r8*Ks)
+
+      Kf=EXP(-12.641_r8+                                                &
+     &       invTk*1590.2_r8+                                           &
+     &       sqrtSO4*1.525_r8+                                          &
+     &       LOG(1.0_r8-0.001005_r8*saltik)+                            &
+     &       LOG(1.0_r8+cff1))
+      tl_Kf=Kf*(tl_invTk*1590.2_r8+tl_sqrtSO4*1.525_r8-                 &
+     &    0.001005_r8*tl_saltik/(1.0_r8-0.001005_r8*saltik)+            &
+     &    tl_cff1/(1.0_r8+cff1))
+!
+!-----------------------------------------------------------------------
+! Calculate concentrations for borate (Uppstrom, 1974), sulfate (Morris
+! and Riley, 1966), and fluoride (Riley, 1965).
+!-----------------------------------------------------------------------
+!
+      borate=0.000232_r8*scl/10.811_r8
+      tl_borate=0.000232_r8*tl_scl/10.811_r8
+
+      sulfate=0.14_r8*scl/96.062_r8
+      tl_sulfate=0.14_r8*tl_scl/96.062_r8
+
+      fluoride=0.000067_r8*scl/18.9984_r8
+      tl_fluoride=0.000067_r8*tl_scl/18.9984_r8
+!
+!=======================================================================
+!  Iterative solver for computing hydrogen ions [H+] using:
+!
+# if defined NEMURO_CARB_NEWTON
+!        Newton-Raphson method with fixed number of iterations,
+!        use previous [H+] as first guess
+!=======================================================================
+!
+!  Set first guess for [H+] solvers.
+!
+      pH_guess=phik            ! Newton-Raphson
+      pH_hi=10.0_r8            ! high bracket/bisection
+      pH_lo=5.0_r8             ! low bracket/bisection
+!
+!  Convert to [H+].
+!
+      H_guess=10.0_r8**(-pH_guess)
+      H_lo=10.0_r8**(-pH_hi)
+      H_hi=10.0_r8**(-pH_lo)
+      H_mid=0.5_r8*(H_lo+H_hi)
+!
+!-----------------------------------------------------------------------
+!  Newton-Raphson method.
+!-----------------------------------------------------------------------
+!
+      H=H_guess
+      K12=K1*K2
+      K12p=K1p*K2p
+      K123p=K12p*K3p
+      invKb=1.0_r8/Kb
+      invKs=1.0_r8/Ks
+      invKsi=1.0_r8/Ksi
+!
+      DO Inewton=1,InewtonMax
+!
+!  Set some common combinations of parameters used in the iterative [H+]
+!  solver.
+!
+        H2=H*H
+        H3=H2*H
+        invH=1.0_r8/H
+        invH2=1.0_r8/H2
+
+        A=H*(K12p+H*(K1p+H))
+        B=H*(K1+H)+K12
+        C=1.0_r8/(1.0_r8+sulfate*invKs)
+
+        A2=A*A
+        B2=B*B
+        dA=H*(2.0_r8*K1p+3.0_r8*H)+K12p
+        dB=2.0_r8*H+K1
+!
+!  Evaluate f([H+]):
+!
+!     fn=HCO3+CO3+borate+OH+HPO4+2*PO4+H3PO4+silicate+Hfree+HSO4+HF-TALK
+!
+        fn=dic*K1*(H+2.0_r8*K2)/B+                                      &
+     &      borate/(1.0_r8+H*invKb)+                                    &
+     &      Kw*invH+                                                    &
+     &      phos*(K12p*H+2.0_r8*K123p-H3)/A+                            &
+     &      sili/(1.0_r8+H*invKsi)-                                     &
+     &      H*C-                                                        &
+     &      sulfate/(1.0_r8+Ks*invH*C)-                                 &
+     &      fluoride/(1.0_r8+Kf*invH)-                                  &
+     &      alk
+!
+!  Evaluate derivative, f(prime)([H+]):
+!
+!     df= d(fn)/d(H)
+!
+        df=dic*K1*(B-dB*(H+2.0_r8*K2))/B2-                              &
+     &      borate/(invKb*(1.0_r8+H*invKb)**2)-                         &
+     &      Kw*invH2+                                                   &
+     &      phos*(A*(K12p-3.0_r8*H2)-dA*(K12p*H+2.0_r8*K123p-H3))/A2-   &
+     &      sili/(invKsi*(1.0_r8+H*invKsi)**2)+                         &
+     &      C+                                                          &
+     &      sulfate*Ks*C*invH2/((1.0_r8+Ks*invH*C)**2)+                 &
+     &      fluoride*Kf*invH2/((1.0_r8+Kf*invH)**2)
+!
+!  Evaluate increment in [H+].
+!
+        deltaH=-fn/df
+!
+!  Update estimate of [H+].
+!
+        H=H+deltaH
+      END DO
+# else
+!        bracket and bisection
+!=======================================================================
+!
+!-----------------------------------------------------------------------
+!  Bracket and bisection method.
+!-----------------------------------------------------------------------
+!
+      K12=K1*K2
+      tl_K12=tl_K1*K2+K1*tl_K2
+      
+      K12p=K1p*K2p
+      tl_K12p=tl_K1p*K2p+K1p*tl_K2p
+
+      K123p=K12p*K3p
+      tl_K123p=tl_K12p*K3p+K12p*tl_K3p
+
+      invKb=1.0_r8/Kb
+      tl_invKb=-tl_Kb*invKb*invKb 
+
+      invKs=1.0_r8/Ks
+      tl_invKs=-tl_Ks*invKs*invKs
+
+      invKsi=1.0_r8/Ksi
+      tl_invKsi=-tl_Ksi*invKsi*invKsi
+!
+!  Set brackets for [H+] solvers.
+!
+!     H_lo=10.0_r8**(-pH_hi) with high bracket pH_hi=10.0
+!
+      H_lo=10.0_r8**(-10.0_r8)
+!
+!     H_hi=10.0_r8**(-pH_lo) with low bracket pH_lo=5.0
+!
+      H_hi=10.0_r8**(-5.0_r8)
+
+      H_mid=0.5_r8*(H_lo+H_hi)
+!
+!-----------------------------------------------------------------------
+!  Perform NL iterations and save result in H.
+!-----------------------------------------------------------------------
+!
+      f_hi=h_total(H_hi, K1, K1p, K12, K12p, K123p,                     &
+     &    Kf, Ks, Kw, invKb, invKs, invKsi,                             &
+     &    alk, borate, dic, fluoride, phos, sili, sulfate)
+          
+      BRACK_IT: DO Ibrack=1,IbrackMax
+!
+!  Evaluate f([H+]) for bracketing and mid-value cases.
+!
+        f_mid=h_total(H_mid, K1, K1p, K12, K12p, K123p,                 &
+     &      Kf, Ks, Kw, invKb, invKs, invKsi,                           &
+     &      alk, borate, dic, fluoride, phos, sili, sulfate)
+!
+!  Now, bracket solution within two of three.
+!
+        IF (f_mid.eq.0.0_r8) THEN
+          EXIT BRACK_IT
+        ELSE
+          ftest=f_hi/f_mid
+          IF (ftest.gt.0.0_r8) THEN
+            H_hi=H_mid
+            f_hi=f_mid
+          ELSE
+            H_lo=H_mid
+            !f_lo=f_mid
+          END IF
+          H_mid=0.5_r8*(H_lo+H_hi)
+        END IF
+      END DO BRACK_IT
+!
+! Last iteration gives value.
+!
+      H=H_mid
+
+      tl_H=0.0_r8
+!
+! tl_H is not equal to zero only if iteration does not converge to 
+! initial bounds.
+!
+      IF (H_lo.ne.10.0_r8**(-10.0_r8).and.                              &
+     &    H_hi.ne.10.0_r8**(-5.0_r8)) THEN
+!
+! Evaluate tl_h_total for tl_H=1.0 and tl_K1=0.0, tl_K1p=0.0, ...
+! to obtain partial derivative.
+!
+          dh_totaldH = tl_h_total(H, 1.0_r8, K1, 0.0_r8,  K1p, 0.0_r8,    &
+     &      K12, 0.0_r8, K12p, 0.0_r8, K123p, 0.0_r8,Kf, 0.0_r8,        &
+     &      Ks, 0.0_r8, Kw, 0.0_r8, invKb, 0.0_r8, invKs, 0.0_r8,       &
+     &      invKsi, 0.0_r8, alk, 0.0_r8, borate, 0.0_r8, dic, 0.0_r8,   &
+     &      fluoride, 0.0_r8, phos, 0.0_r8, sili, 0.0_r8,               &
+     &      sulfate, 0.0_r8)
+     
+        tl_H = 0.0_r8
+        tl_res = tl_h_total(H, tl_H, K1, tl_K1, K1p, tl_K1p,            &
+     &      K12, tl_K12, K12p, tl_K12p, K123p, tl_K123p,                &
+     &      Kf, tl_Kf, Ks, tl_Ks, Kw, tl_Kw,                            &
+     &      invKb, tl_invKb, invKs, tl_invKs, invKsi, tl_invKsi,        &
+     &      alk, tl_alk, borate, tl_borate, dic, tl_dic,                &
+     &      fluoride, tl_fluoride, phos, tl_phos, sili, tl_sili,        &
+     &      sulfate, tl_sulfate) 
+        tl_H=-tl_res/dh_totaldH
+      END IF
+# endif
+!
+!-----------------------------------------------------------------------
+!  Determine pCO2.
+!-----------------------------------------------------------------------
+!
+!  Total Hydrogen ion concentration, H = [H+].
+!
+      H2=H*H
+      tl_H2=2.0_r8*H*tl_H
+!
+!  Calculate [CO2*] (mole/m3) as defined in DOE Methods Handbook 1994
+!  Version 2, ORNL/CDIAC-74, Dickson and Goyet, Eds. (Chapter 2,
+!  page 10, Eq A.49).
+!
+      cff1=dic*H2
+      tl_cff1=tl_dic*H2+dic*tl_H2
+
+      cff2=H2+K1*H+K1*K2
+      tl_cff2=tl_H2+tl_K1*H+K1*tl_H+tl_K1*K2+K1*tl_K2
+
+      CO2star=cff1/cff2
+      tl_CO2star=(tl_cff1-CO2star*tl_cff2)/cff2
+!
+!  Save pH is used again outside this routine.
+!
+      phik=-LOG10(H)
+      tl_phik=-tl_H/(H*logof10)
+!
+!  Add two output arguments for storing pCO2surf.
+!
+      pco2ik=CO2star*1000000.0_r8/ff
+      tl_pco2ik=(tl_CO2star*1000000.0_r8-pco2ik*tl_ff)/ff
+!
+!
+      RETURN
+      END SUBROUTINE tl_pCO2_water
+
+      SUBROUTINE ad_pCO2_water(                                         &
+# ifdef MASKING
+     &                         maskik,                                  &
+# endif
+     &                         tempik, ad_tempik,                       &
+     &                         saltik, ad_saltik,                       &
+     &                         ticik,  ad_ticik,                        &
+     &                         talkik, ad_talkik,                       &
+     &                         po4ik,  ad_po4ik,                        &
+     &                         sio3ik, ad_sio3ik,                       &
+     &                         phik,   ad_phik,                         &
+     &                         pco2ik, ad_pco2ik)
+!
+!***********************************************************************
+!                                                                      !
+!  This routine computes equilibrium partial pressure of CO2 (pCO2)    !
+!  in the surface seawater.                                            !
+!                                                                      !
+!  On Input:                                                           !
+!                                                                      !
+!     maskik     Land/Sea masking.                                     !
+!     tempik     Surface temperature (Celsius).                        !
+!     saltik     Surface salinity (PSS).                               !
+!     ticik      Total inorganic carbon (millimol/m3).                 !
+!     talkik     Total alkalinity (milli-equivalents/m3).              !
+!     po4ik      Inorganic phosphate (millimol/m3).                    !
+!     sio3ik     Inorganic silicate (millimol/m3).                     !
+!                                                                      !
+!  On Output:                                                          !
+!                                                                      !
+!     phik       pH.                                                   !
+!     pco2ik     partial pressure of CO2 (ppmv).                       !
+!                                                                      !
+!  Check Value:  (tempik=24, saltik=36.6, ticik=2040, talkik=2390,     !
+!                 po4ik=0, sio3ik=0)                                   !
+!                                                                      !
+!                pcO2=0.35074945E+03 ppmv  (DoNewton=0)                !
+!                pCO2=0.35073560E+03 ppmv  (DoNewton=1)                !
+!                                                                      !
+!  This subroutine was adapted by Mick Follows (Oct 1999) from OCMIP2  !
+!  code CO2CALC. Modified for ROMS by Hernan Arango (Nov 2003).        !
+!  Performance improvements and code streamlining by Jann Paul Mattern !
+!  (Jul 2015).                                                         !
+!                                                                      !
+!***********************************************************************
+!
+
+!
+!  Imported variable declarations.
+!
+#  ifdef MASKING
+      real(r8), intent(in)  :: maskik
+#  endif
+      real(r8), intent(in)  :: tempik 
+      real(r8), intent(out) :: ad_tempik 
+      real(r8), intent(in)  :: saltik
+      real(r8), intent(out) :: ad_saltik
+      real(r8), intent(in)  :: ticik
+      real(r8), intent(out) :: ad_ticik
+      real(r8), intent(in)  :: talkik
+      real(r8), intent(out) :: ad_talkik
+# if defined NEMURO_CARB_NEWTON
+#  error "NEMURO_CARB_NEWTON is not adjointed yet." 
+      real(r8), intent(inout) :: phik
+# else
+      real(r8), intent(out) :: phik
+      real(r8), intent(in)  :: ad_phik
+# endif
+      real(r8), intent(out) :: pco2ik
+      real(r8), intent(in)  :: ad_pco2ik
+      real(r8), intent(in)  :: po4ik
+      real(r8), intent(out) :: ad_po4ik
+      real(r8), intent(in)  :: sio3ik
+      real(r8), intent(out) :: ad_sio3ik
+!
+!  Local variable declarations.
+!
+# if defined NEMURO_CARB_NEWTON
+      integer, parameter :: InewtonMax = NEMURO_CARB_MAXITER
+      integer :: Inewton
+# else
+      integer, parameter :: IbrackMax = NEMURO_CARB_MAXITER
+      integer :: Ibrack
+# endif
+
+# if defined NEMURO_CARB_NEWTON
+      real(r8) :: df, fn
+      real(r8) :: pH_guess, H_guess
+      real(r8) :: deltaH, invH, invH2, H, H2, H3
+      real(r8) :: A, A2, B, B2, C, dA, dB
+# else
+      real(r8) :: ftest
+      real(r8) :: H_hi, H_lo, H_mid
+      real(r8) :: f_hi, f_mid
+      real(r8) :: H, H2
+      real(r8) :: ad_H, ad_H2
+# endif
+      real(r8) :: Tk, centiTk, invTk, logTk
+      real(r8) :: ad_Tk, ad_centiTk, ad_invTk, ad_logTk
+      real(r8) :: SO4, scl, sqrtS, sqrtSO4
+      real(r8) :: ad_SO4, ad_scl, ad_sqrtS, ad_sqrtSO4
+      real(r8) :: alk, dic, phos, sili
+      real(r8) :: ad_alk, ad_dic, ad_phos, ad_sili
+      real(r8) :: borate, sulfate, fluoride
+      real(r8) :: ad_borate, ad_sulfate, ad_fluoride
+      real(r8) :: ff, K1, K2, K1p, K2p, K3p
+      real(r8) :: ad_ff, ad_K1, ad_K2, ad_K1p, ad_K2p, ad_K3p
+      real(r8) :: Kb, Kf, Ks, Ksi, Kw
+      real(r8) :: ad_Kb, ad_Kf, ad_Ks, ad_Ksi, ad_Kw
+      real(r8) :: K12, K12p, K123p, invKb, invKs, invKsi
+      real(r8) :: ad_K12, ad_K12p, ad_K123p, ad_invKb,ad_invKs,ad_invKsi
+      real(r8) :: CO2star
+      real(r8) :: ad_CO2star
+!
+!  Local helper variables
+!
+      real(r8), parameter :: logof10 = LOG(10.0_r8)
+      real(r8) :: cff1, cff2, dh_totaldH
+      real(r8) :: ad_cff1, ad_cff2, ad_res
+!
+!  Initialize local/output adjoint variables with zero.
+!
+      ad_tempik=0.0_r8
+      ad_saltik=0.0_r8
+      ad_ticik=0.0_r8
+      ad_talkik=0.0_r8
+      ad_po4ik=0.0_r8
+      ad_sio3ik=0.0_r8
+# ifdef MASKING
+      IF (maskik.le.0.0_r8) THEN
+        RETURN
+      END IF
+# endif
+
+      ad_H=0.0_r8
+      ad_H2=0.0_r8
+      ad_Tk=0.0_r8
+      ad_centiTk=0.0_r8
+      ad_invTk=0.0_r8
+      ad_logTk=0.0_r8
+      ad_SO4=0.0_r8
+      ad_scl=0.0_r8
+      ad_sqrtS=0.0_r8
+      ad_sqrtSO4=0.0_r8
+      ad_alk=0.0_r8
+      ad_dic=0.0_r8
+      ad_phos=0.0_r8
+      ad_sili=0.0_r8
+      ad_borate=0.0_r8
+      ad_sulfate=0.0_r8
+      ad_fluoride=0.0_r8
+      ad_ff=0.0_r8
+      ad_K1=0.0_r8
+      ad_K2=0.0_r8
+      ad_K1p=0.0_r8
+      ad_K2p=0.0_r8
+      ad_K3p=0.0_r8
+      ad_Kb=0.0_r8
+      ad_Kf=0.0_r8
+      ad_Ks=0.0_r8
+      ad_Ksi=0.0_r8
+      ad_Kw=0.0_r8
+      ad_K12=0.0_r8
+      ad_K12p=0.0_r8
+      ad_K123p=0.0_r8
+      ad_invKb=0.0_r8
+      ad_invKs=0.0_r8
+      ad_invKsi=0.0_r8
+      ad_CO2star=0.0_r8
+
+      ad_cff1=0.0_r8
+      ad_cff2=0.0_r8
+      ad_res=0.0_r8
+!
+!=======================================================================
+!  Nonlinear code.
+!=======================================================================
+!
+      
+      Tk=tempik+273.15_r8
+      centiTk=0.01_r8*Tk
+      invTk=1.0_r8/Tk
+      logTk=LOG(Tk)
+      sqrtS=SQRT(saltik)
+      SO4=19.924_r8*saltik/(1000.0_r8-1.005_r8*saltik)
+      sqrtSO4=SQRT(SO4)
+      scl=saltik/1.80655_r8
+
+      alk=talkik*0.000001_r8
+      dic=ticik*0.000001_r8
+      phos=po4ik*0.000001_r8
+      sili=sio3ik*0.000001_r8
+!
+!-----------------------------------------------------------------------
+!  Correction term for non-ideality, ff=k0*(1-pH2O). Equation 13 with
+!  table 6 values from Weiss and Price (1980, Mar. Chem., 8, 347-359).
+!-----------------------------------------------------------------------
+!
+      ff=EXP(-162.8301_r8+                                              &
+     &    218.2968_r8/centiTk+                                          &
+     &    LOG(centiTk)*90.9241_r8-                                      &
+     &    centiTk*centiTk*1.47696_r8+                                   &
+     &    saltik*(0.025695_r8-                                          &
+     &    centiTk*(0.025225_r8-                                         &
+     &    centiTk*0.0049867_r8)))
+!
+!-----------------------------------------------------------------------
+!  Compute first (K1) and second (K2) dissociation constant of carboinic
+!  acid:
+!
+!           K1 = [H][HCO3]/[H2CO3]
+!           K2 = [H][CO3]/[HCO3]
+!
+!  From Millero (1995; page 664) using Mehrbach et al. (1973) data on
+!  seawater scale.
+!-----------------------------------------------------------------------
+!
+      K1=10.0_r8**(62.008_r8-invTk*3670.7_r8-logTk*9.7944_r8+           &
+     &    saltik*(0.0118_r8-saltik*0.000116_r8))
+      K2=10.0_r8**(-4.777_r8-invTk*1394.7_r8+                           &
+     &    saltik*(0.0184_r8-saltik*0.000118_r8))
+!
+!-----------------------------------------------------------------------
+!  Compute dissociation constant of boric acid, Kb=[H][BO2]/[HBO2].
+!  From Millero (1995; page 669) using data from Dickson (1990).
+!-----------------------------------------------------------------------
+!
+      Kb=EXP(-invTk*(8966.90_r8+                                        &
+     &               sqrtS*(2890.53_r8+                                 &
+     &                      sqrtS*(77.942_r8-                           &
+     &                             sqrtS*(1.728_r8-                     &
+     &                                    sqrtS*0.0996_r8))))-          &
+     &       logTk*(24.4344_r8+                                         &
+     &              sqrtS*(25.085_r8+                                   &
+     &                     sqrtS*0.2474_r8))+                           &
+     &       Tk*(sqrtS*0.053105_r8)+                                    &
+     &       148.0248_r8+                                               &
+     &       sqrtS*(137.1942_r8+                                        &
+     &              sqrtS*1.62142_r8))
+      !if (Kb.eq.0.0_r8) Kb=0.000001_r8 ! TODO Kb can become zero 
+!
+!-----------------------------------------------------------------------
+!  Compute first (K1p), second (K2p), and third (K3p) dissociation
+!  constant of phosphoric acid:
+!
+!           K1p = [H][H2PO4]/[H3PO4]
+!           K2p = [H][HPO4]/[H2PO4]
+!           K3p = [H][PO4]/[HPO4]
+!
+!  From DOE (1994) equations 7.2.20, 7.2.23, and 7.2.26, respectively.
+!  With footnote using data from Millero (1974).
+!-----------------------------------------------------------------------
+!
+      K1p=EXP(115.525_r8-                                               &
+     &        invTk*4576.752_r8-                                        &
+     &        logTk*18.453_r8+                                          &
+     &        sqrtS*(0.69171_r8-invTk*106.736_r8)-                      &
+     &        saltik*(0.01844_r8+invTk*0.65643_r8))
+      K2p=EXP(172.0883_r8-                                              &
+     &        invTk*8814.715_r8-                                        &
+     &        logTk*27.927_r8+                                          &
+     &        sqrtS*(1.3566_r8-invTk*160.340_r8)-                       &
+     &        saltik*(0.05778_r8-invTk*0.37335_r8))
+      K3p=EXP(-18.141_r8-                                               &
+     &        invTk*3070.75_r8+                                         &
+     &        sqrtS*(2.81197_r8+invTk*17.27039_r8)-                     &
+     &        saltik*(0.09984_r8+invTk*44.99486_r8))
+!
+!-----------------------------------------------------------------------
+!  Compute dissociation constant of silica, Ksi=[H][SiO(OH)3]/[Si(OH)4].
+!  From Millero (1995; page 671) using data from Yao and Millero (1995).
+!-----------------------------------------------------------------------
+!
+      Ksi=EXP(117.385_r8-                                               &
+     &        invTk*8904.2_r8-                                          &
+     &        logTk*19.334_r8+                                          &
+     &        sqrtSO4*(3.5913_r8-invTk*458.79_r8)-                      &
+     &        SO4*(1.5998_r8-invTk*188.74_r8-                           &
+     &             SO4*(0.07871_r8-invTk*12.1652_r8))+                  &
+     &        LOG(1.0_r8-0.001005_r8*saltik))
+!
+!-----------------------------------------------------------------------
+!  Compute ion product of whater, Kw = [H][OH].
+!  From Millero (1995; page 670) using composite data.
+!-----------------------------------------------------------------------
+!
+      Kw=EXP(148.9652_r8-                                               &
+     &       invTk*13847.26_r8-                                         &
+     &       logTk*23.6521_r8-                                          &
+     &       sqrtS*(5.977_r8-                                           &
+     &              invTk*118.67_r8-                                    &
+     &              logTk*1.0495_r8)-                                   &
+     &       saltik*0.01615_r8)
+!
+!------------------------------------------------------------------------
+!  Compute salinity constant of hydrogen sulfate, Ks = [H][SO4]/[HSO4].
+!  From Dickson (1990, J. chem. Thermodynamics 22, 113)
+!------------------------------------------------------------------------
+!
+      Ks=EXP(141.328_r8-                                                &
+     &       invTk*4276.1_r8-                                           &
+     &       logTk*23.093_r8+                                           &
+     &       sqrtSO4*(324.57_r8-invTk*13856.0_r8-logTk*47.986_r8-       &
+     &                SO4*invTk*2698.0_r8)-                             &
+     &       SO4*(771.54_r8-invTk*35474.0_r8-logTk*114.723_r8-          &
+     &            SO4*invTk*1776.0_r8)+                                 &
+     &       LOG(1.0_r8-0.001005_r8*saltik))
+!
+!-----------------------------------------------------------------------
+!  Compute stability constant of hydrogen fluorid, Kf = [H][F]/[HF].
+!  From Dickson and Riley (1979) -- change pH scale to total.
+!-----------------------------------------------------------------------
+!
+      Kf=EXP(-12.641_r8+                                                &
+     &       invTk*1590.2_r8+                                           &
+     &       sqrtSO4*1.525_r8+                                          &
+     &       LOG(1.0_r8-0.001005_r8*saltik)+                            &
+     &       LOG(1.0_r8+0.1400_r8*scl/(96.062_r8*Ks)))
+!
+!-----------------------------------------------------------------------
+! Calculate concentrations for borate (Uppstrom, 1974), sulfate (Morris
+! and Riley, 1966), and fluoride (Riley, 1965).
+!-----------------------------------------------------------------------
+!
+      borate=0.000232_r8*scl/10.811_r8
+      sulfate=0.14_r8*scl/96.062_r8
+      fluoride=0.000067_r8*scl/18.9984_r8
+!
+!=======================================================================
+!  Iterative solver for computing hydrogen ions [H+] using:
+!
+# if defined NEMURO_CARB_NEWTON
+!        Newton-Raphson method with fixed number of iterations,
+!        use previous [H+] as first guess
+!=======================================================================
+!
+!  Set first guess for [H+] solvers.
+!
+      pH_guess=phik            ! Newton-Raphson
+      pH_hi=10.0_r8            ! high bracket/bisection
+      pH_lo=5.0_r8             ! low bracket/bisection
+!
+!  Convert to [H+].
+!
+      H_guess=10.0_r8**(-pH_guess)
+      H_lo=10.0_r8**(-pH_hi)
+      H_hi=10.0_r8**(-pH_lo)
+      H_mid=0.5_r8*(H_lo+H_hi)
+!
+!-----------------------------------------------------------------------
+!  Newton-Raphson method.
+!-----------------------------------------------------------------------
+!
+      H=H_guess
+      K12=K1*K2
+      K12p=K1p*K2p
+      K123p=K12p*K3p
+      invKb=1.0_r8/Kb
+      invKs=1.0_r8/Ks
+      invKsi=1.0_r8/Ksi
+!
+      DO Inewton=1,InewtonMax
+!
+!  Set some common combinations of parameters used in the iterative [H+]
+!  solver.
+!
+        H2=H*H
+        H3=H2*H
+        invH=1.0_r8/H
+        invH2=1.0_r8/H2
+
+        A=H*(K12p+H*(K1p+H))
+        B=H*(K1+H)+K12
+        C=1.0_r8/(1.0_r8+sulfate*invKs)
+
+        A2=A*A
+        B2=B*B
+        dA=H*(2.0_r8*K1p+3.0_r8*H)+K12p
+        dB=2.0_r8*H+K1
+!
+!  Evaluate f([H+]):
+!
+!     fn=HCO3+CO3+borate+OH+HPO4+2*PO4+H3PO4+silicate+Hfree+HSO4+HF-TALK
+!
+        fn=dic*K1*(H+2.0_r8*K2)/B+                                      &
+     &      borate/(1.0_r8+H*invKb)+                                    &
+     &      Kw*invH+                                                    &
+     &      phos*(K12p*H+2.0_r8*K123p-H3)/A+                            &
+     &      sili/(1.0_r8+H*invKsi)-                                     &
+     &      H*C-                                                        &
+     &      sulfate/(1.0_r8+Ks*invH*C)-                                 &
+     &      fluoride/(1.0_r8+Kf*invH)-                                  &
+     &      alk
+!
+!  Evaluate derivative, f(prime)([H+]):
+!
+!     df= d(fn)/d(H)
+!
+        df=dic*K1*(B-dB*(H+2.0_r8*K2))/B2-                              &
+     &      borate/(invKb*(1.0_r8+H*invKb)**2)-                         &
+     &      Kw*invH2+                                                   &
+     &      phos*(A*(K12p-3.0_r8*H2)-dA*(K12p*H+2.0_r8*K123p-H3))/A2-   &
+     &      sili/(invKsi*(1.0_r8+H*invKsi)**2)+                         &
+     &      C+                                                          &
+     &      sulfate*Ks*C*invH2/((1.0_r8+Ks*invH*C)**2)+                 &
+     &      fluoride*Kf*invH2/((1.0_r8+Kf*invH)**2)
+!
+!  Evaluate increment in [H+].
+!
+        deltaH=-fn/df
+!
+!  Update estimate of [H+].
+!
+        H=H+deltaH
+      END DO
+# else
+!        bracket and bisection
+!=======================================================================
+!
+!-----------------------------------------------------------------------
+!  Bracket and bisection method.
+!-----------------------------------------------------------------------
+!
+      K12=K1*K2
+      K12p=K1p*K2p
+      K123p=K12p*K3p
+      invKb=1.0_r8/Kb
+      invKs=1.0_r8/Ks
+      invKsi=1.0_r8/Ksi
+!
+!  Set brackets for [H+] solvers.
+!
+!     H_lo=10.0_r8**(-pH_hi) with high bracket pH_hi=10.0
+!
+      H_lo=10.0_r8**(-10.0_r8)
+!
+!     H_hi=10.0_r8**(-pH_lo) with low bracket pH_lo=5.0
+!
+      H_hi=10.0_r8**(-5.0_r8)
+
+      H_mid=0.5_r8*(H_lo+H_hi)
+!
+!
+      f_hi=h_total(H_hi, K1, K1p, K12, K12p, K123p,                     &
+     &    Kf, Ks, Kw, invKb, invKs, invKsi,                             &
+     &    alk, borate, dic, fluoride, phos, sili, sulfate)
+!      f_lo=h_total(H_lo, K1, K1p, K12, K12p, K123p,                     &
+!     &    Kf, Ks, Kw, invKb, invKs, invKsi,                             &
+!     &    alk, borate, dic, fluoride, phos, sili, sulfate)
+          
+      BRACK_IT: DO Ibrack=1,IbrackMax
+!
+!  Evaluate f([H+]) for bracketing and mid-value cases.
+!
+        f_mid=h_total(H_mid, K1, K1p, K12, K12p, K123p,                 &
+     &      Kf, Ks, Kw, invKb, invKs, invKsi,                           &
+     &      alk, borate, dic, fluoride, phos, sili, sulfate)
+!
+!  Now, bracket solution within two of three.
+!
+        IF (f_mid.eq.0.0_r8) THEN
+          EXIT BRACK_IT
+        ELSE
+          ftest=f_hi/f_mid
+          IF (ftest.gt.0.0_r8) THEN
+            H_hi=H_mid
+            f_hi=f_mid
+          ELSE
+            H_lo=H_mid
+            !f_lo=f_mid
+          END IF
+          H_mid=0.5_r8*(H_lo+H_hi)
+        END IF
+      END DO BRACK_IT
+!
+! Last iteration gives value.
+!
+      H=H_mid
+# endif
+!
+!-----------------------------------------------------------------------
+!  Determine pCO2.
+!-----------------------------------------------------------------------
+!
+!  Total Hydrogen ion concentration, H = [H+].
+!
+      H2=H*H
+!
+!  Calculate [CO2*] (mole/m3) as defined in DOE Methods Handbook 1994
+!  Version 2, ORNL/CDIAC-74, Dickson and Goyet, Eds. (Chapter 2,
+!  page 10, Eq A.49).
+!
+      CO2star=dic*H2/(H2+K1*H+K1*K2)
+!
+!  Save pH is used again outside this routine.
+!
+      phik=-LOG10(H)
+!
+!  Add two output arguments for storing pCO2surf.
+!
+      pco2ik=CO2star*1000000.0_r8/ff
+
+
+!
+!=======================================================================
+!  End of nonlinear code.
+!=======================================================================
+!
+
+!
+!-----------------------------------------------------------------------
+!  Determine pCO2.
+!-----------------------------------------------------------------------
+!
+!>    tl_pco2ik=(tl_CO2star*1000000.0_r8-pco2ik*tl_ff)/ff
+      ad_CO2star=ad_CO2star+ad_pco2ik*1000000.0_r8/ff
+      ad_ff=ad_ff-ad_pco2ik*pco2ik/ff
+!x    ad_pco2ik=0.0
+
+!>    tl_phik=-tl_H/(H*logof10)
+      ad_H=ad_H-ad_phik/(H*logof10)
+!x    ad_phik=0.0_r8
+
+!
+!  Calculate [CO2*] (mole/m3) as defined in DOE Methods Handbook 1994
+!  Version 2, ORNL/CDIAC-74, Dickson and Goyet, Eds. (Chapter 2,
+!  page 10, Eq A.49).
+!
+      cff1=dic*H2
+      cff2=H2+K1*H+K1*K2
+      
+!>    tl_CO2star=(tl_cff1-CO2star*tl_cff2)/cff2
+      ad_cff1=ad_cff1+ad_CO2star/cff2
+      ad_cff2=ad_cff2-ad_CO2star*CO2star/cff2
+      ad_CO2star=0.0_r8
+      
+!>    tl_cff2=tl_H2+tl_K1*H+K1*tl_H+tl_K1*K2+K1*tl_K2
+      ad_H=ad_H+ad_cff2*K1
+      ad_H2=ad_H2+ad_cff2
+      ad_K1=ad_K1+ad_cff2*(H+K2)
+      ad_K2=ad_K2+ad_cff2*K1
+      ad_cff2=0.0_r8
+      
+!>    tl_cff1=tl_dic*H2+dic*tl_H2
+      ad_dic=ad_dic+ad_cff1*H2
+      ad_H2=ad_H2+ad_cff1*dic
+      ad_cff1=0.0_r8
+!
+!  Total Hydrogen ion concentration, H = [H+].
+!
+!>    tl_H2=2.0_r8*H*tl_H
+      ad_H=ad_H+ad_H2*2.0_r8*H
+      ad_H2=0.0_r8
+!
+!=======================================================================
+!  Iterative solver for computing hydrogen ions [H+] using:
+!
+# if defined NEMURO_CARB_NEWTON
+!        Newton-Raphson method with fixed number of iterations,
+!        use previous [H+] as first guess
+!=======================================================================
+!
+
+!
+!  Adjoint code not available yet.
+!
+# else
+!        bracket and bisection
+!=======================================================================
+!
+
+!
+! tl_H is not equal to zero only if iteration does not converge to 
+! initial bounds.
+!
+      IF (H_lo.ne.10.0_r8**(-10.0_r8).and.                              &
+     &    H_hi.ne.10.0_r8**(-5.0_r8)) THEN
+!
+! Evaluate tl_h_total for tl_H=1.0 and tl_K1=0.0, tl_K1p=0.0, ...
+! to obtain partial derivative.
+!
+        dh_totaldH = tl_h_total(H, 1.0_r8, K1, 0.0_r8,  K1p, 0.0_r8,    &
+     &      K12, 0.0_r8, K12p, 0.0_r8, K123p, 0.0_r8,Kf, 0.0_r8,        &
+     &      Ks, 0.0_r8, Kw, 0.0_r8, invKb, 0.0_r8, invKs, 0.0_r8,       &
+     &      invKsi, 0.0_r8, alk, 0.0_r8, borate, 0.0_r8, dic, 0.0_r8,   &
+     &      fluoride, 0.0_r8, phos, 0.0_r8, sili, 0.0_r8,               &
+     &      sulfate, 0.0_r8)
+
+        ad_res=0.0
+!>      tl_H=-tl_res/dh_totaldH
+        ad_res=ad_res-ad_H/dh_totaldH
+        ad_H=0.0_r8
+
+!>      tl_res = tl_h_total(H, tl_H, K1, tl_K1, K1p, tl_K1p, K12,tl_K12,&
+!>   &      K12p, tl_K12p, K123p, tl_K123p,                             &
+!>   &      Kf, tl_Kf, Ks, tl_Ks, Kw, tl_Kw,                            &
+!>   &      invKb, tl_invKb, invKs, tl_invKs, invKsi, tl_invKsi,        &
+!>   &      alk, tl_alk, borate, tl_borate, dic, tl_dic,                &
+!>   &      fluoride, tl_fluoride, phos, tl_phos, sili, tl_sili,        &
+!>   &      sulfate, tl_sulfate) 
+        CALL ad_h_total(H, ad_H, K1, ad_K1, K1p, ad_K1p, K12,ad_K12,    &
+     &      K12p, ad_K12p, K123p, ad_K123p,                             &
+     &      Kf, ad_Kf, Ks, ad_Ks, Kw, ad_Kw,                            &
+     &      invKb, ad_invKb, invKs, ad_invKs, invKsi, ad_invKsi,        &
+     &      alk, ad_alk, borate, ad_borate, dic, ad_dic,                &
+     &      fluoride, ad_fluoride, phos, ad_phos, sili, ad_sili,        &
+     &      sulfate, ad_sulfate, ad_res)
+      END IF
+
+!>    tl_invKsi=-tl_Ksi*invKsi*invKsi
+      ad_Ksi=ad_Ksi-ad_invKsi*invKsi*invKsi
+      ad_invKsi=0.0_r8
+
+!>    tl_invKs=-tl_Ks*invKs*invKs
+      ad_Ks=ad_Ks-ad_invKs*invKs*invKs
+      ad_invKs=0.0_r8
+      
+!>    tl_invKb=-tl_Kb*invKb*invKb 
+      ad_Kb=ad_Kb-ad_invKb*invKb*invKb
+      ad_invKb=0.0_r8
+
+!>    tl_K123p=tl_K12p*K3p+K12p*tl_K3p
+      ad_K12p=ad_K12p+ad_K123p*K3p
+      ad_K3p=ad_K3p+ad_K123p*K12p
+      ad_K123p=0.0_r8
+
+!>    tl_K12p=tl_K1p*K2p+K1p*tl_K2p
+      ad_K1p=ad_K1p+ad_K12p*K2p
+      ad_K2p=ad_K2p+ad_K12p*K1p
+      ad_K12p=0.0_r8
+
+!>    tl_K12=tl_K1*K2+K1*tl_K2
+      ad_K1=ad_K1+ad_K12*K2
+      ad_K2=ad_K2+ad_K12*K1
+      ad_K12=0.0_r8
+      
+# endif
+!
+!-----------------------------------------------------------------------
+! Calculate concentrations for borate (Uppstrom, 1974), sulfate (Morris
+! and Riley, 1966), and fluoride (Riley, 1965).
+!-----------------------------------------------------------------------
+!
+!>    tl_fluoride=0.000067_r8*tl_scl/18.9984_r8
+      ad_scl=ad_scl+ad_fluoride*0.000067_r8/18.9984_r8
+      ad_fluoride=0.0_r8
+
+!>    tl_sulfate=0.14_r8*tl_scl/96.062_r8
+      ad_scl=ad_scl+ad_sulfate*0.14_r8/96.062_r8
+      ad_sulfate=0.0_r8
+
+!>    tl_borate=0.000232_r8*tl_scl/10.811_r8
+      ad_scl=ad_scl+ad_borate*0.000232_r8/10.811_r8
+      ad_borate=0.0_r8
+!
+!-----------------------------------------------------------------------
+!  Compute stability constant of hydrogen fluorid, Kf = [H][F]/[HF].
+!  From Dickson and Riley (1979) -- change pH scale to total.
+!-----------------------------------------------------------------------
+!
+      cff1=0.1400_r8*scl/(96.062_r8*Ks)
+
+!>    tl_Kf=Kf*(tl_invTk*1590.2_r8+tl_sqrtSO4*1.525_r8-                 &
+!>   &    0.001005_r8*tl_saltik/(1.0_r8-0.001005_r8*saltik)+            &
+!>   &    tl_cff1/(1.0_r8+cff1))
+      ad_invTk=ad_invTk+ad_Kf*Kf*1590.2_r8
+      ad_sqrtSO4=ad_sqrtSO4+ad_Kf*Kf*1.525_r8
+      ad_saltik=ad_saltik-ad_Kf*Kf*0.001005_r8/                         &
+     &    (1.0_r8-0.001005_r8*saltik)
+      ad_cff1=ad_cff1+ad_Kf*Kf/(1.0_r8+cff1)
+      ad_Kf=0.0_r8
+
+!>    tl_cff1=(0.1400_r8*tl_scl-cff1*96.062_r8*tl_Ks)/(96.062_r8*Ks)
+      ad_scl=ad_scl+ad_cff1*0.1400_r8/(96.062_r8*Ks)
+      ad_Ks=ad_Ks-ad_cff1*cff1/Ks
+      ad_cff1=0.0_r8
+!
+!------------------------------------------------------------------------
+!  Compute salinity constant of hydrogen sulfate, Ks = [H][SO4]/[HSO4].
+!  From Dickson (1990, J. chem. Thermodynamics 22, 113)
+!------------------------------------------------------------------------
+!
+      cff1=324.57_r8-invTk*13856.0_r8-logTk*47.986_r8-                  &
+     &    SO4*invTk*2698.0_r8
+      cff2=771.54_r8-invTk*35474.0_r8-logTk*114.723_r8-                 &
+     &    SO4*invTk*1776.0_r8
+
+!>    tl_Ks=Ks*(-tl_invTk*4276.1_r8-tl_logTk*23.093_r8+                 &
+!>   &    tl_sqrtSO4*cff1+sqrtSO4*tl_cff1-                              &
+!>   &    tl_SO4*cff2-SO4*tl_cff2-                                      &
+!>   &    0.001005_r8*tl_saltik/(1.0_r8-0.001005_r8*saltik))
+      ad_invTk=ad_invTk-ad_Ks*Ks*4276.1_r8
+      ad_logTk=ad_logTk-ad_Ks*Ks*23.093_r8
+      ad_sqrtSO4=ad_sqrtSO4+ad_Ks*Ks*cff1
+      ad_cff1=ad_cff1+ad_Ks*Ks*sqrtSO4
+      ad_SO4=ad_SO4-ad_Ks*Ks*cff2
+      ad_cff2=ad_cff2-ad_Ks*Ks*SO4
+      ad_saltik=ad_saltik-ad_Ks*Ks*0.001005_r8/                         &
+     &    (1.0_r8-0.001005_r8*saltik)
+      ad_Ks=0.0_r8
+
+!>    tl_cff2=-tl_invTk*35474.0_r8-tl_logTk*114.723_r8-                 &
+!>   &    (tl_SO4*invTk+SO4*tl_invTk)*1776.0_r8
+      ad_invTk=ad_invTk-ad_cff2*(35474.0_r8+SO4*1776.0_r8)
+      ad_logTk=ad_logTk-ad_cff2*114.723_r8
+      ad_SO4=ad_SO4-ad_cff2*invTk*1776.0_r8
+      ad_cff2=0.0_r8
+
+!>    tl_cff1=-tl_invTk*13856.0_r8-tl_logTk*47.986_r8-                  &
+!>   &    (tl_SO4*invTk+SO4*tl_invTk)*2698.0_r8
+      ad_invTk=ad_invTk-ad_cff1*(13856.0_r8+SO4*2698.0_r8)
+      ad_logTk=ad_logTk-ad_cff1*47.986_r8
+      ad_SO4=ad_SO4-ad_cff1*invTk*2698.0_r8
+      ad_cff1=0.0_r8
+!
+!-----------------------------------------------------------------------
+!  Compute ion product of whater, Kw = [H][OH].
+!  From Millero (1995; page 670) using composite data.
+!-----------------------------------------------------------------------
+!
+      cff1=5.977_r8-invTk*118.67_r8-logTk*1.0495_r8
+      
+!>    tl_Kw=Kw*(-tl_invTk*13847.26_r8-tl_logTk*23.6521_r8-              &
+!>   &    tl_sqrtS*cff1-sqrtS*tl_cff1-                                  &
+!>   &    tl_saltik*0.01615_r8)
+      ad_invTk=ad_invTk-ad_Kw*Kw*13847.26_r8
+      ad_logTk=ad_logTk-ad_Kw*Kw*23.6521_r8
+      ad_sqrtS=ad_sqrtS-ad_Kw*Kw*cff1
+      ad_cff1=ad_cff1-ad_Kw*Kw*sqrtS
+      ad_saltik=ad_saltik-ad_Kw*Kw*0.01615_r8
+      ad_Kw=0.0_r8
+      
+!>    tl_cff1=-tl_invTk*118.67_r8-tl_logTk*1.0495_r8
+      ad_invTk=ad_invTk-ad_cff1*118.67_r8
+      ad_logTk=ad_logTk-ad_cff1*1.0495_r8
+      ad_cff1=0.0_r8
+!
+!-----------------------------------------------------------------------
+!  Compute dissociation constant of silica, Ksi=[H][SiO(OH)3]/[Si(OH)4].
+!  From Millero (1995; page 671) using data from Yao and Millero (1995).
+!-----------------------------------------------------------------------
+!
+      cff1=3.5913_r8-invTk*458.79_r8
+      cff2=1.5998_r8-invTk*188.74_r8-SO4*(0.07871_r8-invTk*12.1652_r8)
+
+!>    tl_Ksi=Ksi*(-tl_invTk*8904.2_r8-tl_logTk*19.334_r8+               &
+!>   &    tl_sqrtSO4*cff1+sqrtSO4*tl_cff1-                              &
+!>   &    tl_SO4*cff2-SO4*tl_cff2-                                      &
+!>   &    0.001005_r8*tl_saltik/(1.0_r8-0.001005_r8*saltik))
+      ad_invTk=ad_invTk-ad_Ksi*Ksi*8904.2_r8
+      ad_logTk=ad_logTk-ad_Ksi*Ksi*19.334_r8
+      ad_sqrtSO4=ad_sqrtSO4+ad_Ksi*Ksi*cff1
+      ad_cff1=ad_cff1+ad_Ksi*Ksi*sqrtSO4
+      ad_SO4=ad_SO4-ad_Ksi*Ksi*cff2
+      ad_cff2=ad_cff2-ad_Ksi*Ksi*SO4
+      ad_saltik=ad_saltik-ad_Ksi*Ksi*0.001005_r8/                       &
+     &    (1.0_r8-0.001005_r8*saltik)
+      ad_Ksi=0.0_r8
+
+!>    tl_cff2=-tl_invTk*188.74_r8-tl_SO4*(0.07871_r8-invTk*12.1652_r8)+ &
+!>   &    SO4*tl_invTk*12.1652_r8
+      ad_invTk=ad_invTk+ad_cff2*(-188.74_r8+SO4*12.1652_r8)
+      ad_SO4=ad_SO4-ad_cff2*(0.07871_r8-invTk*12.1652_r8)
+      ad_cff2=0.0_r8
+
+!>    tl_cff1=-tl_invTk*458.79_r8
+      ad_invTk=ad_invTk-ad_cff1*458.79_r8
+      ad_cff1=0.0_r8
+!
+!-----------------------------------------------------------------------
+!  Compute first (K1p), second (K2p), and third (K3p) dissociation
+!  constant of phosphoric acid:
+!
+!           K1p = [H][H2PO4]/[H3PO4]
+!           K2p = [H][HPO4]/[H2PO4]
+!           K3p = [H][PO4]/[HPO4]
+!
+!  From DOE (1994) equations 7.2.20, 7.2.23, and 7.2.26, respectively.
+!  With footnote using data from Millero (1974).
+!-----------------------------------------------------------------------
+!
+      cff1=2.81197_r8+invTk*17.27039_r8
+      cff2=0.09984_r8+invTk*44.99486_r8
+
+!>    tl_K3p=K3p*(-tl_invTk*3070.75_r8+                                 &
+!>   &    tl_sqrtS*cff1+sqrtS*tl_cff1-                                  &
+!>   &    tl_saltik*cff2-saltik*tl_cff2)
+      ad_invTk=ad_invTk-ad_K3p*K3p*3070.75_r8
+      ad_sqrtS=ad_sqrtS+ad_K3p*K3p*cff1
+      ad_cff1=ad_cff1+ad_K3p*K3p*sqrtS
+      ad_saltik=ad_saltik-ad_K3p*K3p*cff2
+      ad_cff2=ad_cff2-ad_K3p*K3p*saltik
+      ad_K3p=0.0_r8
+
+!>    tl_cff2=tl_invTk*44.99486_r8
+      ad_invTk=ad_invTk+ad_cff2*44.99486_r8
+      ad_cff2=0.0_r8
+
+!>    tl_cff1=tl_invTk*17.27039_r8
+      ad_invTk=ad_invTk+ad_cff1*17.27039_r8
+      ad_cff1=0.0_r8
+      
+      cff1=1.3566_r8-invTk*160.340_r8
+      cff2=0.05778_r8-invTk*0.37335_r8
+
+!>    tl_K2p=K2p*(-tl_invTk*8814.715_r8-tl_logTk*27.927_r8+             &
+!>   &    tl_sqrtS*cff1+sqrtS*tl_cff1-                                  &
+!>   &    tl_saltik*cff2-saltik*tl_cff2)
+      ad_invTk=ad_invTk-ad_K2p*K2p*8814.715_r8
+      ad_logTk=ad_logTk-ad_K2p*K2p*27.927_r8
+      ad_sqrtS=ad_sqrtS+ad_K2p*K2p*cff1
+      ad_cff1=ad_cff1+ad_K2p*K2p*sqrtS
+      ad_saltik=ad_saltik-ad_K2p*K2p*cff2
+      ad_cff2=ad_cff2-ad_K2p*K2p*saltik
+      ad_K2p=0.0_r8
+
+!>    tl_cff2=-tl_invTk*0.37335_r8
+      ad_invTk=ad_invTk-ad_cff2*0.37335_r8
+      ad_cff2=0.0_r8
+
+!>    tl_cff1=-tl_invTk*160.340_r8
+      ad_invTk=ad_invTk-ad_cff1*160.340_r8
+      ad_cff1=0.0_r8
+
+      cff1=0.69171_r8-invTk*106.736_r8
+      cff2=0.01844_r8+invTk*0.65643_r8
+
+!>    tl_K1p=K1p*(-tl_invTk*4576.752_r8-tl_logTk*18.453_r8+             &
+!>   &    tl_sqrtS*cff1+sqrtS*tl_cff1-                                  &
+!>   &    tl_saltik*cff2-saltik*tl_cff2)
+      ad_invTk=ad_invTk-ad_K1p*K1p*4576.752_r8
+      ad_logTk=ad_logTk-ad_K1p*K1p*18.453_r8
+      ad_sqrtS=ad_sqrtS+ad_K1p*K1p*cff1
+      ad_cff1=ad_cff1+ad_K1p*K1p*sqrtS
+      ad_saltik=ad_saltik-ad_K1p*K1p*cff2
+      ad_cff2=ad_cff2-ad_K1p*K1p*saltik
+      ad_K1p=0.0_r8
+
+!>    tl_cff2=tl_invTk*0.65643_r8
+      ad_invTk=ad_invTk+ad_cff2*0.65643_r8
+      ad_cff2=0.0_r8
+      
+!>    tl_cff1=-tl_invTk*106.736_r8
+      ad_invTk=ad_invTk-ad_cff1*106.736_r8
+      ad_cff1=0.0_r8
+!
+!-----------------------------------------------------------------------
+!  Compute dissociation constant of boric acid, Kb=[H][BO2]/[HBO2].
+!  From Millero (1995; page 669) using data from Dickson (1990).
+!-----------------------------------------------------------------------
+!
+      cff1=8966.90_r8+sqrtS*(2890.53_r8+sqrtS*(77.942_r8-               &
+     &    sqrtS*(1.728_r8-sqrtS*0.0996_r8)))
+      cff2=24.4344_r8+sqrtS*(25.085_r8+sqrtS*0.2474_r8)
+
+!>    tl_Kb=Kb*(-tl_invTk*cff1-invTk*tl_cff1-                           &
+!>   &    tl_logTk*cff2-logTk*tl_cff2+                                  &
+!>   &    tl_Tk*sqrtS*0.053105_r8+Tk*tl_sqrtS*0.053105_r8+              &
+!>   &    tl_sqrtS*(137.1942_r8+2.0_r8*sqrtS*1.62142_r8))
+      ad_invTk=ad_invTk-ad_Kb*Kb*cff1
+      ad_cff1=ad_cff1-ad_Kb*Kb*invTk
+      ad_logTk=ad_logTk-ad_Kb*Kb*cff2
+      ad_cff2=ad_cff2-ad_Kb*Kb*logTk
+      ad_Tk=ad_Tk+ad_Kb*Kb*sqrtS*0.053105_r8
+      ad_sqrtS=ad_sqrtS+ad_Kb*Kb*(Tk*0.053105_r8+137.1942_r8+           &
+     &    2.0_r8*sqrtS*1.62142_r8)
+      ad_Kb=0.0_r8
+
+!>    tl_cff2=tl_sqrtS*(25.085_r8+2.0_r8*sqrtS*0.2474_r8)
+      ad_sqrtS=ad_sqrtS+ad_cff2*(25.085_r8+2.0_r8*sqrtS*0.2474_r8)
+      ad_cff2=0.0_r8
+
+!>    tl_cff1=tl_sqrtS*(2890.53_r8+sqrtS*(2.0_r8*77.942_r8-             &
+!>   &    sqrtS*(3.0_r8*1.728_r8-sqrtS*0.0996_r8*4.0_r8)))
+      ad_sqrtS=ad_sqrtS+ad_cff1*(2890.53_r8+sqrtS*(2.0_r8*77.942_r8-    &
+     &    sqrtS*(3.0_r8*1.728_r8-sqrtS*0.0996_r8*4.0_r8)))
+      ad_cff1=0.0_r8
+!
+!-----------------------------------------------------------------------
+!  Compute first (K1) and second (K2) dissociation constant of carboinic
+!  acid:
+!
+!           K1 = [H][HCO3]/[H2CO3]
+!           K2 = [H][CO3]/[HCO3]
+!
+!  From Millero (1995; page 664) using Mehrbach et al. (1973) data on
+!  seawater scale.
+!-----------------------------------------------------------------------
+!
+!>    tl_K2=logof10*K2*(-tl_invTk*1394.7_r8+                            &
+!>   &    tl_saltik*(0.0184_r8-2.0_r8*saltik*0.000118_r8))
+      ad_invTk=ad_invTk-ad_K2*logof10*K2*1394.7_r8
+      ad_saltik=ad_saltik+ad_K2*logof10*K2*                             &
+     &    (0.0184_r8-2.0_r8*saltik*0.000118_r8)
+      ad_K2=0.0_r8
+
+!>    tl_K1=logof10*K1*(-tl_invTk*3670.7_r8-tl_logTk*9.7944_r8+         &
+!>   &    tl_saltik*(0.0118_r8-2.0_r8*saltik*0.000116_r8))
+      ad_invTk=ad_invTk-ad_K1*logof10*K1*3670.7_r8
+      ad_logTk=ad_logTk-ad_K1*logof10*K1*9.7944_r8
+      ad_saltik=ad_saltik+ad_K1*logof10*K1*                             &
+     &    (0.0118_r8-2.0_r8*saltik*0.000116_r8)
+      ad_K1=0.0_r8 
+!
+!-----------------------------------------------------------------------
+!  Correction term for non-ideality, ff=k0*(1-pH2O). Equation 13 with
+!  table 6 values from Weiss and Price (1980, Mar. Chem., 8, 347-359).
+!-----------------------------------------------------------------------
+!
+      cff1=0.025695_r8-centiTk*(0.025225_r8-centiTk*0.0049867_r8)
+
+!>    tl_ff=ff*(-218.2968_r8*tl_centiTk/(centiTk*centiTk)+              &
+!>   &    90.9241_r8*tl_centiTk/centiTk-                                &
+!>   &    2.0_r8*tl_centiTk*centiTk*1.47696_r8+                         &
+!>   &    tl_saltik*cff1+saltik*tl_cff1)
+      ad_centiTk=ad_centiTk+ad_ff*ff*(-218.2968_r8/(centiTk*centiTk)+   &
+     &    90.9241_r8/centiTk-2.0_r8*centiTk*1.47696_r8)
+      ad_saltik=ad_saltik+ad_ff*ff*cff1
+      ad_cff1=ad_cff1+ad_ff*ff*saltik
+      ad_ff=0.0_r8
+
+!>    tl_cff1=-tl_centiTk*(0.025225_r8-2.0_r8*centiTk*0.0049867_r8)
+      ad_centiTk=ad_centiTk-ad_cff1*                                    &
+     &    (0.025225_r8-2.0_r8*centiTk*0.0049867_r8)
+      ad_cff1=0.0_r8
+!
+!=======================================================================
+!  Determine coefficients for surface carbon chemisty.  If land/sea
+!  masking, compute only on water points.
+!=======================================================================
+!
+!>    tl_sili=tl_sio3ik*0.000001_r8
+      ad_sio3ik=ad_sio3ik+ad_sili*0.000001_r8
+      ad_sili=0.0_r8
+
+!>    tl_phos=tl_po4ik*0.000001_r8
+      ad_po4ik=ad_po4ik+ad_phos*0.000001_r8
+      ad_phos=0.0_r8
+
+!>    tl_dic=tl_ticik*0.000001_r8
+      ad_ticik=ad_ticik+ad_dic*0.000001_r8
+      ad_dic=0.0_r8
+
+!>    tl_alk=tl_talkik*0.000001_r8
+      ad_talkik=ad_talkik+ad_alk*0.000001_r8
+      ad_alk=0.0_r8
+
+!>    tl_scl=tl_saltik/1.80655_r8
+      ad_saltik=ad_saltik+ad_scl/1.80655_r8
+      ad_scl=0.0_r8
+  
+!>    tl_sqrtSO4=0.5_r8*tl_SO4/sqrtSO4
+      ad_SO4=ad_SO4+ad_sqrtSO4*0.5_r8/sqrtSO4
+      ad_sqrtSO4=0.0_r8
+
+!>    tl_SO4=(19.924_r8+SO4*1.005_r8)*tl_saltik/                        &
+!>   &    (1000.0_r8-1.005_r8*saltik)
+      ad_saltik=ad_saltik+ad_SO4*(19.924_r8+SO4*1.005_r8)/              &
+     &    (1000.0_r8-1.005_r8*saltik)
+      ad_SO4=0.0_r8
+
+!>    tl_sqrtS=0.5_r8*tl_saltik/sqrtS
+      ad_saltik=ad_saltik+ad_sqrtS*0.5_r8/sqrtS
+      ad_sqrtS=0.0_r8
+
+!>    tl_logTk=tl_Tk*invTk
+      ad_Tk=ad_Tk+ad_logTk*invTk
+      ad_logTk=0.0_r8
+
+!>    tl_invTk=-tl_Tk*invTk*invTk
+      ad_Tk=ad_Tk-ad_invTk*invTk*invTk
+      ad_invTk=0.0_r8
+
+!>    tl_centiTk=0.01_r8*tl_Tk
+      ad_Tk=ad_Tk+ad_centiTk*0.01_r8
+      ad_centiTk=0.0_r8
+
+!>    tl_Tk=tl_tempik
+      ad_tempik=ad_tempik+ad_Tk
+      ad_Tk=0.0_r8
+      
+      RETURN
+      END SUBROUTINE ad_pCO2_water
+
+      FUNCTION h_total(H, K1, K1p, K12, K12p, K123p,                    &
+     &                 Kf, Ks, Kw, invKb, invKs, invKsi,                &
+     &                 alk, borate, dic, fluoride, phos, sili, sulfate) &
+     &                 RESULT(res)
+
+!
+!  Imported variable declarations.
+!
+      real(r8), intent(in) :: H, K1, K1p, K12, K12p, K123p
+      real(r8), intent(in) :: Kf,Ks,Kw,invKb,invKs,invKsi
+      real(r8), intent(in) :: alk,borate,dic,fluoride,phos,sili,sulfate
+!
+!  Local variable declarations.
+!
+      real(r8) :: res, H3, invH, A, B, C
+      
+      H3=H*H*H
+      invH=1.0_r8/H
+      A=H*(K12p+H*(K1p+H))+K123p
+      B=H*(K1+H)+K12
+      C=1.0_r8/(1.0_r8+sulfate*invKs)
+      res=dic*(K1*H+2.0_r8*K12)/B+borate/(1.0_r8+H*invKb)+Kw*invH+phos* &
+     &    (K12p*H+2.0_r8*K123p-H3)/A+sili/(1.0_r8+H*invKsi)-H*C-sulfate/&
+     &    (1.0_r8+Ks*invH*C)-fluoride/(1.0_r8+Kf*invH)-alk
+      
+      END FUNCTION
+
+      FUNCTION tl_h_total(H, tl_H, K1, tl_K1, K1p, tl_K1p, K12, tl_K12, &
+     &    K12p, tl_K12p, K123p, tl_K123p,                               &
+     &    Kf, tl_Kf, Ks, tl_Ks, Kw, tl_Kw,                              &
+     &    invKb, tl_invKb, invKs, tl_invKs, invKsi, tl_invKsi,          &
+     &    alk, tl_alk, borate, tl_borate, dic, tl_dic,                  &
+     &    fluoride, tl_fluoride, phos, tl_phos, sili, tl_sili,          &
+     &    sulfate, tl_sulfate) RESULT(tl_res)
+
+!
+!  Imported variable declarations.
+!
+      real(r8), intent(in) :: H, K1, K1p, K12, K12p
+      real(r8), intent(in) :: tl_H, tl_K1, tl_K1p, tl_K12, tl_K12p
+      real(r8), intent(in) :: K123p, Kf, Ks, Kw, invKb
+      real(r8), intent(in) :: tl_K123p, tl_Kf, tl_Ks, tl_Kw, tl_invKb
+      real(r8), intent(in) :: invKs, invKsi
+      real(r8), intent(in) :: tl_invKs, tl_invKsi
+      real(r8), intent(in) :: alk, borate, dic, fluoride
+      real(r8), intent(in) :: tl_alk, tl_borate, tl_dic, tl_fluoride
+      real(r8), intent(in) :: phos, sili, sulfate
+      real(r8), intent(in) :: tl_phos, tl_sili, tl_sulfate
+!
+!  Local variable declarations.
+!
+      real(r8) :: H3, invH, A, B, C, cff1
+      real(r8) :: tl_res, tl_H3, tl_invH, tl_A, tl_B, tl_C, tl_cff1
+      
+      H3=H*H*H
+      tl_H3=3.0_r8*tl_H*H*H
+
+      invH=1.0_r8/H
+      tl_invH=-tl_H*invH*invH
+
+      A=H*(K12p+H*(K1p+H))+K123p
+      tl_A=tl_H*(K12p+H*(K1p+H))+                                       &
+     &    H*(tl_K12p+tl_H*(K1p+H)+H*(tl_K1p+tl_H))+                     &
+     &    tl_K123p
+
+      B=H*(K1+H)+K12
+      tl_B=tl_H*(K1+H)+H*(tl_K1+tl_H)+tl_K12
+
+      C=1.0_r8/(1.0_r8+sulfate*invKs)
+      tl_C=-(tl_sulfate*invKs+sulfate*tl_invKs)*C*C
+
+!
+!  Compute tl_res summand by summand.
+!
+
+!>    res=dic*(K1*H+2.0_r8*K12)/B+borate/(1.0_r8+H*invKb)+Kw*invH+phos* &
+!>   &    (K12p*H+2.0_r8*K123p-H3)/A+sili/(1.0_r8+H*invKsi)-H*C-sulfate/&
+!>   &    (1.0_r8+Ks*invH*C)-fluoride/(1.0_r8+Kf*invH)-alk
+
+!>    res=dic*(K1*H+2.0_r8*K12)/B
+      cff1=(K1*H+2.0_r8*K12)/B
+      tl_cff1=(tl_K1*H+K1*tl_H+2.0_r8*tl_K12-cff1*tl_B)/B
+      tl_res=tl_dic*cff1+dic*tl_cff1
+
+!>    res=res+borate/(1.0_r8+H*invKb)
+      cff1=1.0_r8/(1.0_r8+H*invKb)
+      tl_cff1=-(tl_H*invKb+H*tl_invKb)*cff1*cff1
+      tl_res=tl_res+tl_borate*cff1+borate*tl_cff1
+
+!>    res=res+Kw*invH
+      tl_res=tl_res+tl_Kw*invH+Kw*tl_invH
+
+!>    res=res+phos*(K12p*H+2.0_r8*K123p-H3)/A
+      cff1=(K12p*H+2.0_r8*K123p-H3)/A
+      tl_cff1=(tl_K12p*H+K12p*tl_H+2.0_r8*tl_K123p-tl_H3-cff1*tl_A)/A
+      tl_res=tl_res+phos*tl_cff1+tl_phos*cff1
+
+!>    res=res+sili/(1.0_r8+H*invKsi)
+      cff1=1.0_r8/(1.0_r8+H*invKsi)
+      tl_cff1=-(tl_H*invKsi+H*tl_invKsi)*cff1*cff1
+      tl_res=tl_res+tl_sili*cff1+sili*tl_cff1
+
+!>    res=res-H*C
+      tl_res=tl_res-tl_H*C-H*tl_C
+
+!>    res=res-sulfate/(1.0_r8+Ks*invH*C)
+      cff1=1.0_r8/(1.0_r8+Ks*invH*C)
+      tl_cff1=-(tl_Ks*invH*C+Ks*tl_invH*C+Ks*invH*tl_C)*cff1*cff1
+      tl_res=tl_res-tl_sulfate*cff1-sulfate*tl_cff1
+
+!>    res=res-fluoride/(1.0_r8+Kf*invH)-alk
+      cff1=1.0_r8/(1.0_r8+Kf*invH)
+      tl_cff1=-(tl_Kf*invH+Kf*tl_invH)*cff1*cff1
+      tl_res=tl_res-tl_fluoride*cff1-fluoride*tl_cff1-tl_alk
+
+      END FUNCTION
+      
+      SUBROUTINE ad_h_total(H, ad_H, K1, ad_K1, K1p, ad_K1p, K12,ad_K12,&
+     &    K12p, ad_K12p, K123p, ad_K123p,                               &
+     &    Kf, ad_Kf, Ks, ad_Ks, Kw, ad_Kw,                              &
+     &    invKb, ad_invKb, invKs, ad_invKs, invKsi, ad_invKsi,          &
+     &    alk, ad_alk, borate, ad_borate, dic, ad_dic,                  &
+     &    fluoride, ad_fluoride, phos, ad_phos, sili, ad_sili,          &
+     &    sulfate, ad_sulfate, ad_res)
+
+!
+!  Imported variable declarations.
+!
+      real(r8), intent(in)    :: H, K1, K1p, K12, K12p
+      real(r8), intent(inout) :: ad_H, ad_K1, ad_K1p, ad_K12, ad_K12p
+      real(r8), intent(in)    :: K123p, Kf, Ks, Kw, invKb
+      real(r8), intent(inout) :: ad_K123p, ad_Kf, ad_Ks, ad_Kw, ad_invKb
+      real(r8), intent(in)    :: invKs, invKsi
+      real(r8), intent(inout) :: ad_invKs, ad_invKsi
+      real(r8), intent(in)    :: alk, borate, dic, fluoride
+      real(r8), intent(inout) :: ad_alk, ad_borate, ad_dic, ad_fluoride
+      real(r8), intent(in)    :: phos, sili, sulfate
+      real(r8), intent(inout) :: ad_phos, ad_sili, ad_sulfate
+      real(r8), intent(in)    :: ad_res 
+!
+!  Local variable declarations.
+!
+      real(r8) :: H3, invH, A, B, C, cff1
+      real(r8) :: ad_H3, ad_invH, ad_A, ad_B, ad_C, ad_cff1
+     
+!
+!  Initialize local adjoint variables with zero.
+!
+      ad_sulfate=0.0_r8
+      ad_H3=0.0_r8
+      ad_invH=0.0_r8
+      ad_A=0.0_r8
+      ad_B=0.0_r8
+      ad_C=0.0_r8
+      ad_cff1=0.0_r8
+     
+!
+!=======================================================================
+!  Nonlinear code.
+!=======================================================================
+!
+      H3=H*H*H
+      invH=1.0_r8/H
+      A=H*(K12p+H*(K1p+H))+K123p
+      B=H*(K1+H)+K12
+      C=1.0_r8/(1.0_r8+sulfate*invKs)
+!x    res=...
+
+!
+!=======================================================================
+!  Adjoint code.
+!=======================================================================
+!
+
+!
+!  Compute tl_res summand by summand.
+!
+
+      cff1=1.0_r8/(1.0_r8+Kf*invH)
+!>    tl_res=tl_res-tl_fluoride*cff1-fluoride*tl_cff1-tl_alk
+      ad_fluoride=ad_fluoride-ad_res*cff1
+      ad_cff1=ad_cff1-ad_res*fluoride
+      ad_alk=ad_alk-ad_res
+
+!>    tl_cff1=-(tl_Kf*invH+Kf*tl_invH)*cff1*cff1
+      ad_Kf=ad_Kf-ad_cff1*cff1*cff1*invH
+      ad_invH=ad_invH-ad_cff1*cff1*cff1*Kf
+      ad_cff1=0.0_r8
+
+      cff1=1.0_r8/(1.0_r8+Ks*invH*C)
+!>    tl_res=tl_res-tl_sulfate*cff1-sulfate*tl_cff1
+      ad_sulfate=ad_sulfate-ad_res*cff1
+      ad_cff1=ad_cff1-ad_res*sulfate
+
+!>    tl_cff1=-(tl_Ks*invH*C+Ks*tl_invH*C+Ks*invH*tl_C)*cff1*cff1
+      ad_Ks=ad_Ks-ad_cff1*cff1*cff1*invH*C
+      ad_invH=ad_invH-ad_cff1*cff1*cff1*Ks*C
+      ad_C=ad_C-ad_cff1*cff1*cff1*Ks*invH
+      ad_cff1=0.0_r8
+
+!>    tl_res=tl_res-tl_H*C-H*tl_C
+      ad_H=ad_H-ad_res*C
+      ad_C=ad_C-ad_res*H
+
+      cff1=1.0_r8/(1.0_r8+H*invKsi)
+!>    tl_res=tl_res+tl_sili*cff1+sili*tl_cff1
+      ad_sili=ad_sili+ad_res*cff1
+      ad_cff1=ad_cff1+ad_res*sili
+
+!>    tl_cff1=-(tl_H*invKsi+H*tl_invKsi)*cff1*cff1
+      ad_H=ad_H-ad_cff1*cff1*cff1*invKsi
+      ad_invKsi=ad_invKsi-ad_cff1*cff1*cff1*H
+      ad_cff1=0.0_r8
+
+      cff1=(K12p*H+2.0_r8*K123p-H3)/A
+!>    tl_res=tl_res+phos*tl_cff1+tl_phos*cff1
+      ad_phos=ad_phos+ad_res*cff1
+      ad_cff1=ad_cff1+ad_res*phos
+
+!>    tl_cff1=(tl_K12p*H+K12p*tl_H+2.0_r8*tl_K123p-tl_H3-cff1*tl_A)/A
+      ad_K12p=ad_K12p+ad_cff1*H/A
+      ad_H=ad_H+ad_cff1*K12p/A
+      ad_K123p=ad_K123p+ad_cff1*2.0_r8/A
+      ad_H3=ad_H3-ad_cff1/A
+      ad_A=ad_A-ad_cff1*cff1/A
+      ad_cff1=0.0_r8
+
+!>    tl_res=tl_res+tl_Kw*invH+Kw*tl_invH
+      ad_Kw=ad_Kw+ad_res*invH
+      ad_invH=ad_invH+ad_res*Kw
+
+      cff1=1.0_r8/(1.0_r8+H*invKb)
+!>    tl_res=tl_res+tl_borate*cff1+borate*tl_cff1
+      ad_borate=ad_borate+ad_res*cff1
+      ad_cff1=ad_cff1+ad_res*borate
+
+!>    tl_cff1=-(tl_H*invKb+H*tl_invKb)*cff1*cff1
+      ad_H=ad_H-ad_cff1*cff1*cff1*invKb
+      ad_invKb=ad_invKb-ad_cff1*cff1*cff1*H
+      ad_cff1=0.0_r8
+
+      cff1=(K1*H+2.0_r8*K12)/B
+!>    tl_res=tl_dic*cff1+dic*tl_cff1
+      ad_dic=ad_dic+ad_res*cff1
+      ad_cff1=ad_cff1+ad_res*dic
+!x    ad_res=0.0_r8
+
+!>    tl_cff1=(tl_K1*H+K1*tl_H+2.0_r8*tl_K12-cff1*tl_B)/B
+      ad_K1=ad_K1+ad_cff1*H/B
+      ad_H=ad_H+ad_cff1*K1/B
+      ad_K12=ad_K12+ad_cff1*2.0_r8/B
+      ad_B=ad_B-ad_cff1*cff1/B
+      ad_cff1=0.0_r8
+
+!>    tl_C=-(tl_sulfate*invKs+sulfate*tl_invKs)*C*C
+      ad_sulfate=ad_sulfate-ad_C*C*C*invKs
+      ad_invKs=ad_invKs-ad_C*C*C*sulfate
+      ad_C=0.0_r8
+
+!>    tl_B=tl_H*(K1+H)+H*(tl_K1+tl_H)+tl_K12
+      ad_H=ad_H+ad_B*(K1+2.0_r8*H)
+      ad_K1=ad_K1+ad_B*H
+      ad_K12=ad_K12+ad_B
+      ad_B=0.0_r8
+
+!>    tl_A=tl_H*(K12p+H*(K1p+H))+                                       &
+!>   &    H*(tl_K12p+tl_H*(K1p+H)+H*(tl_K1p+tl_H))+                     &
+!>   &    tl_K123p
+      ad_H=ad_H+ad_A*(K12p+2.0_r8*H*(K1p+H)+H*H)
+      ad_K12p=ad_K12p+ad_A*H
+      ad_K1p=ad_K1p+ad_A*H*H
+      ad_K123p=ad_K123p+ad_A
+      ad_A=0.0_r8
+
+!>    tl_invH=-tl_H*invH*invH
+      ad_H=ad_H-ad_invH*invH*invH
+      ad_invH=0.0_r8
+
+!>    tl_H3=3.0_r8*tl_H*H*H
+      ad_H=ad_H+ad_H3*3.0_r8*H*H
+      ad_H3=0.0_r8
+
+      END SUBROUTINE
+

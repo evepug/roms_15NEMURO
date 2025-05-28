@@ -1505,7 +1505,7 @@
                   DO k=1,N(ng)
                     cff=dt(ng)*pm(Isrc,Jsrc)*pn(Isrc,Jsrc)
 # ifdef SPLINES_VDIFF
-                    cff=cff*oHz(Isrc,Jsrc,k)
+                    cff=cff*oHz(Isrc,Jsrc,k)           !splines diff
 # endif
                     IF (LtracerSrc(itrc,ng)) THEN
                       cff3=SOURCES(ng)%Tsrc(is,k,itrc)
